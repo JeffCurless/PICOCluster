@@ -127,6 +127,7 @@ Each node continuously **listens** for state-broadcast messages from its peers a
 
 | Field | Description |
 |---|---|
+| **Version** | PCode VM version — a single unsigned integer; the Controller admits the node only if this matches the expected version exactly |
 | Node identifier | Unique ID for the sending node |
 | IP address | Sender's current IP on the WiFi network |
 | Current CPU load | Used for thread-migration decisions |
@@ -192,17 +193,62 @@ Minimum file API operations (exact wire format TBD):
 
 "File" means any named blob of data — **not** a mounted filesystem or NFS/SMB share.
 
-#### 4.3.2 Cluster Monitoring
+#### 4.3.2 Node Bootstrap Protocol
 
-The Controller listens to the same UDP heartbeat broadcasts that the PICO nodes exchange (§4.2). It maintains a view of the entire cluster:
+Neither the PICO nor the Controller needs any pre-configured knowledge of the other's address. Discovery is fully automatic:
 
-- Which nodes are currently visible (reachable on the network)
+```
+PICO                                         Controller
+ |                                                 |
+ |-- UDP broadcast: heartbeat (version, ID, ...) ->|
+ |                                                 |
+ |          [Controller checks version]            |
+ |                                                 |
+ |  version OK:                                    |
+ |<-- UDP unicast: CONTROLLER_ANNOUNCE ------------|
+ |    (Controller IP, file API port, ...)          |
+ |                                                 |
+ |-- TCP connect to Controller ----------------->  |
+ |                                                 |
+ |<======== file API, program dispatch ===========>|
+ |                                                 |
+ |  version MISMATCH:                              |
+ |    (no reply — PICO stays isolated)             |
+ |    Controller logs PICO as "needs update"       |
+```
+
+Step by step:
+
+1. **PICO boot** — after joining WiFi the PICO immediately begins broadcasting heartbeats (§4.2). It has no knowledge of the Controller's address.
+2. **Controller hears heartbeat and checks version** — the Controller reads the version field from the heartbeat and compares it to the current expected version.
+   - **Version matches** — the Controller sends a `CONTROLLER_ANNOUNCE` message as a **UDP unicast** directly to the PICO's IP (taken from the heartbeat). The announce message contains the Controller's IP and TCP port for the file API.
+   - **Version mismatch** — the Controller does **not** send `CONTROLLER_ANNOUNCE`. The PICO receives no reply and remains isolated from the cluster. The Controller records the node in a separate **quarantine list** (node ID, IP, reported version) for later remediation.
+3. **PICO receives announce** — the PICO stores the Controller's address and opens a **persistent TCP connection** to the Controller's file API port. All subsequent file operations (OPEN, READ, WRITE, CLOSE, LIST) and program dispatch travel over this connection.
+4. **Reconnection** — if the TCP connection drops (Controller restart, network blip), the PICO's ongoing heartbeats will trigger a fresh version check and `CONTROLLER_ANNOUNCE` from the Controller as soon as it is back, causing the PICO to reconnect automatically.
+
+Key properties of this design:
+- **Zero pre-configuration** on either side — no static addresses, no config files listing peers.
+- **Version-gated admission** — only PICOs running the expected firmware version join the active cluster; older or mismatched nodes are visible to the operator but cannot participate.
+- **Controller-initiated connection** — the Controller reaches out first (unicast), so the PICO never needs to know where to look.
+- **PICO-initiated TCP** — the PICO opens the durable connection, so the Controller does not need to manage inbound TCP sockets per PICO at startup.
+- The `CONTROLLER_ANNOUNCE` message is **not** a heartbeat and does not enter any PICO's neighbor table.
+
+#### 4.3.3 Cluster Monitoring
+
+The Controller listens to the same UDP heartbeat broadcasts that the PICO nodes exchange (§4.2). It maintains two separate node registries:
+
+**Active nodes** — PICOs whose heartbeat version matches the current expected version and that have successfully connected via TCP:
 - Per-node: IP address, CPU load, free memory, running thread count
 - History of node state over time (for graphs and alerting)
 
-Unlike PICO nodes, the Controller is not bounded by an 8-entry neighbor table — it tracks all nodes it can see.
+**Quarantine list** — PICOs heard on the network but running an incompatible version:
+- Per-node: IP address, reported version number, time first seen, time last seen
+- These nodes are **not** invited to connect and cannot access shared files or receive dispatched programs
+- Entries are never automatically purged — they persist until the operator clears them or the node reappears with the correct version (at which point it moves to the active list)
 
-#### 4.3.3 Program Dispatch
+Unlike PICO nodes, the Controller is not bounded by an 8-entry neighbor table — it tracks every node it can hear, regardless of version.
+
+#### 4.3.4 Program Dispatch
 
 The Controller can **send PCode programs to any node** for execution. This provides a single point of control for launching workloads across the cluster without needing direct access to individual PICOs.
 
@@ -211,18 +257,19 @@ Dispatch flow (details TBD):
 2. Controller transmits the PCode binary to the target node over TCP.
 3. Target node loads the program and begins execution; the Controller monitors progress via subsequent heartbeats.
 
-#### 4.3.4 Dashboard GUI
+#### 4.3.5 Dashboard GUI
 
 The Controller runs a graphical dashboard providing a real-time view of the cluster. Intended panels:
 
 | Panel | Description |
 |---|---|
-| **Node list** | One tile per visible PICO — node ID, IP, status indicator |
-| **CPU utilization** | Rolling graph of CPU load per node (similar to a system monitor) |
-| **Memory** | Free/used memory per node |
+| **Active nodes** | One tile per connected PICO — node ID, IP, status indicator |
+| **CPU utilization** | Rolling graph of CPU load per active node (similar to a system monitor) |
+| **Memory** | Free/used memory per active node |
 | **Shared files** | List of files currently hosted on the Controller; open handles |
 | **Shared memory** | Active shared-memory regions and which nodes are accessing them |
-| **Program dispatch** | UI to select a PCode binary and send it to one or all nodes |
+| **Program dispatch** | UI to select a PCode binary and send it to one or all active nodes |
+| **Quarantine list** | PICOs running an incompatible version — node ID, IP, reported version, last seen; operator can initiate a firmware update from here |
 
 The dashboard is a read/write interface — it can observe the cluster and also act on it (dispatch programs, inspect or modify shared files).
 
@@ -263,9 +310,11 @@ These items need resolution before or during initial implementation:
 7. **Residency timeout** — how long must a node be in the table while fully loaded before it becomes a candidate for load-based eviction?
 8. ~~**Addressing mode table**~~ — **resolved**: IMM (0x0, 4 bytes), REG (0x1, 1 byte), IND (0x2, 1 byte), IDX (0x3, 5 bytes), DIR (0x4, 4 bytes); 0x5–0xF reserved (see §3.2.4).
    - ~~Remaining sub-question: number of registers~~ — **resolved**: 8 registers (`R0`–`R7`), index range 0–7 (see §3.2.5).
-10. **Lock implementation** — centralized lock server on the Controller Node? Token-ring? Distributed algorithm (e.g., Lamport)?
-11. **Periodic switch interval** — instruction count threshold for cooperative yield?
-12. **Controller Node identity** — is the Controller's address static/pre-configured on each PICO, or announced via a special heartbeat field?
+9. **Lock implementation** — centralized lock server on the Controller Node? Token-ring? Distributed algorithm (e.g., Lamport)?
+10. **Periodic switch interval** — instruction count threshold for cooperative yield?
+11. ~~**Version number format**~~ — **resolved**: single unsigned integer, exact match required (see §4.2).
+12. ~~**Controller Node identity**~~ — **resolved**: zero pre-configuration on both sides; Controller hears PICO heartbeats, checks version, and replies with `CONTROLLER_ANNOUNCE` only to matching nodes; PICO then opens a persistent TCP connection (see §4.3.2).
+    - **Remaining sub-question**: `CONTROLLER_ANNOUNCE` wire format — what fields beyond IP and file API port?
 13. **File API wire format** — message framing, encoding (binary vs. text), and error responses for OPEN/READ/WRITE/CLOSE/LIST?
 14. **Dashboard technology** — what UI framework/language for the Controller dashboard (web app, native GUI, terminal UI)?
 15. **Program dispatch acknowledgement** — how does the Controller know a dispatched program was received and started successfully?
