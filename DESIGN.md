@@ -35,7 +35,7 @@ Each PICO W runs an interpreter that fetches, decodes, and executes PCode byteco
 Each instruction is laid out in memory as:
 
 ```
-[ OPCODE (1 byte) ] [ ADDR_MODE ... (1 or 2 bytes) ] [ OPERAND ... (0–32 bytes) ]
+[ OPCODE (1 byte) ] [ ADDR_MODE ... (0–2 bytes) ] [ OPERAND ... (0–20 bytes) ]
 ```
 
 #### 3.2.1 Opcode byte
@@ -59,21 +59,48 @@ Each addressing mode byte encodes two operand modes, one per nibble (4 bits each
 | 3 | 2 (byte 0: modes 1 & 2; byte 1: high nibble = mode₃, low nibble = 0x0) |
 | 4 | 2 (byte 0: modes 1 & 2; byte 1: modes 3 & 4) |
 
-#### 3.2.3 Operands
+#### 3.2.3 Data sizes
 
-Operand bytes follow the addressing mode byte(s) in left-to-right operand order. The addressing mode for each operand determines how many bytes it consumes. The maximum operand size is **8 bytes** (64-bit value), giving a worst-case instruction length of:
+All integer values and addresses are **32 bits (4 bytes)**. This matches the PICO W's native word size and keeps the memory footprint small. The encoding is designed so the integer width can be increased later (e.g., to 64-bit) by redefining the addressing mode operand sizes — the instruction format itself does not need to change.
+
+#### 3.2.4 Addressing modes
+
+Five modes are defined, occupying nibble values `0x0`–`0x4`. Nibble values `0x5`–`0xF` are reserved for future use.
+
+| Nibble | Mnemonic | Operand bytes | Description |
+|:---:|:---:|:---:|---|
+| `0x0` | `IMM` | 4 | **Immediate** — 32-bit value encoded inline in the instruction stream |
+| `0x1` | `REG` | 1 | **Register** — register index (0–7); value is the register's contents |
+| `0x2` | `IND` | 1 | **Indirect** — register index (0–7); the register holds a 32-bit address, and the operand value is read from that address |
+| `0x3` | `IDX` | 5 | **Indexed** — base register index (0–7, 1 byte) + 4-byte signed 32-bit displacement; effective address = register value + displacement |
+| `0x4` | `DIR` | 4 | **Direct** — 32-bit absolute address encoded inline; the operand value is read from that address |
+| `0x5`–`0xF` | *(reserved)* | — | Available for future modes (e.g., PC-relative, stack-relative) |
+
+#### 3.2.5 Registers
+
+The PCode VM has three categories of registers. All are 32-bit and all are **per-thread** — each thread carries its own complete register state, so a cooperative context switch is simply a swap of this set.
+
+| Register | Type | Description |
+|---|---|---|
+| `R0`–`R7` | General-purpose (data) | Eight 32-bit data registers for arithmetic, addressing, and temporary values |
+| `IP` | Instruction Pointer | Address of the next instruction to fetch; advanced automatically by the fetch loop and modified by `JUMP`, `CALL`, and `RETURN` |
+| `SP` | Stack Pointer | Address of the top of the current thread's stack; updated by `CALL`, `RETURN`, and any explicit push/pop instructions |
+
+The register index field in `REG`, `IND`, and `IDX` operands addresses only the data registers; only values `0`–`7` are valid — the upper 5 bits of the index byte are unused and should be zero. `IP` and `SP` are not directly addressable as general operands; they are manipulated implicitly by the instructions that own them.
+
+#### 3.2.7 Operands
+
+Operand bytes follow the addressing mode byte(s) in left-to-right operand order. The number of bytes consumed per operand is determined entirely by its addressing mode (see table above).
+
+Worst-case instruction length — four `IDX` operands:
 
 ```
-1 (opcode) + 2 (addr mode) + 4 × 8 (operands) = 35 bytes
+1 (opcode) + 2 (addr mode bytes) + 4 × 5 (IDX operands) = 23 bytes
 ```
 
-Instruction size range: **1 byte** (opcode only, no operands) to **35 bytes** (4 × 8-byte operands).
+Instruction size range: **1 byte** (opcode only, no operands) to **23 bytes** (4 × indexed operands).
 
-#### 3.2.4 Addressing modes (TBD)
-
-The 16 mode values per nibble are not yet assigned. Candidates include immediate, register, direct memory, indirect, indexed, and others. See [Open Questions](#6-open-questions).
-
-#### 3.2.5 Instruction set (preliminary)
+#### 3.2.8 Instruction set (preliminary)
 
 | Category       | Instructions                                      |
 |----------------|---------------------------------------------------|
@@ -226,16 +253,16 @@ Shared memory is modeled as named "files" stored on the central host. Any node r
 These items need resolution before or during initial implementation:
 
 1. **Implementation language** — MicroPython (easier iteration) vs. C with the Pico SDK (lower overhead, faster interpreter)?
-2. ~~**Bytecode encoding**~~ — **resolved**: 1-byte opcode, 0–2 addressing-mode bytes (4 bits per operand), 0–4 operands up to 8 bytes each; 1–35 bytes per instruction (see §3.2).
-   - **Remaining sub-question**: endianness of multi-byte operands (little-endian preferred for PICO / ARM, but not yet locked in).
-   - **Remaining sub-question**: the 16 addressing mode encodings — see item below.
+2. ~~**Bytecode encoding**~~ — **resolved**: 1-byte opcode, 0–2 addressing-mode bytes (4 bits per operand), 0–4 operands; integers and addresses are 32-bit; 1–23 bytes per instruction (see §3.2).
+   - **Remaining sub-question**: endianness of multi-byte operands (little-endian preferred for PICO W / ARM Cortex-M33, but not yet locked in).
 3. ~~**Node discovery protocol**~~ — **resolved**: UDP broadcast heartbeats; each node listens and maintains a bounded neighbor table (see §4.2).
 4. ~~**Neighbor table size limit**~~ — **resolved**: default **8 entries**, configurable (see §4.2).
 5. **Heartbeat broadcast interval** — exact interval in milliseconds? Tradeoff between discovery latency and WiFi traffic.
    - Dead-node timeout is derived from this value (3× interval), so the interval also controls how quickly a crashed node is evicted.
 6. **Full-load threshold** — what CPU load % and/or free memory floor defines "fully loaded" for eviction purposes?
 7. **Residency timeout** — how long must a node be in the table while fully loaded before it becomes a candidate for load-based eviction?
-8. **Addressing mode table** — define all 16 mode encodings (e.g., immediate, register, direct, indirect, indexed, …) and the operand byte size each implies.
+8. ~~**Addressing mode table**~~ — **resolved**: IMM (0x0, 4 bytes), REG (0x1, 1 byte), IND (0x2, 1 byte), IDX (0x3, 5 bytes), DIR (0x4, 4 bytes); 0x5–0xF reserved (see §3.2.4).
+   - ~~Remaining sub-question: number of registers~~ — **resolved**: 8 registers (`R0`–`R7`), index range 0–7 (see §3.2.5).
 10. **Lock implementation** — centralized lock server on the Controller Node? Token-ring? Distributed algorithm (e.g., Lamport)?
 11. **Periodic switch interval** — instruction count threshold for cooperative yield?
 12. **Controller Node identity** — is the Controller's address static/pre-configured on each PICO, or announced via a special heartbeat field?
