@@ -27,8 +27,39 @@ Each PICO W runs an interpreter that fetches, decodes, and executes PCode byteco
 
 ### 3.1 Cooperative Multithreading
 
-- The interpreter performs a **periodic thread switch** at a configurable interval (e.g., every N instructions).
-- Any instruction that blocks waiting for a resource (I/O, lock, network) triggers an **immediate thread switch** rather than stalling the node.
+Two conditions trigger a thread switch:
+
+1. **Time-slice expiry** — the running thread has consumed its 2 ms time slice.
+2. **Resource block** — the running thread executes an instruction that must wait for a resource (I/O, lock, network); it yields immediately rather than stalling the node.
+
+#### Time-slice mechanism
+
+The time slice is **2 milliseconds**. Rather than a hardware interrupt, the check is performed by the fetch-decode-execute loop itself — before dispatching each instruction the interpreter checks whether the current thread's slice has expired:
+
+```
+loop:
+    if (now() - thread.start_time) >= 2ms:
+        switch_thread()          // save context, pick next thread
+        thread.start_time = now() // reset slice for resumed thread
+    fetch → decode → execute next instruction
+    goto loop
+```
+
+The thread's start time is stored **inside the thread data structure** (see §3.1.1). It is written once when the thread first begins execution and again every time the thread is resumed after a switch. This makes the slice self-contained per thread — no shared timer state is needed.
+
+#### 3.1.1 Thread data structure (partial)
+
+The thread context block holds everything needed to suspend and resume a thread. Fields defined so far:
+
+| Field | Size | Description |
+|---|---|---|
+| `start_time` | 4 bytes | Timestamp (ms) when this thread last began or resumed execution; compared against `now()` to detect slice expiry |
+| `R0`–`R7` | 32 bytes | Saved general-purpose register values |
+| `IP` | 4 bytes | Instruction pointer — address of the next instruction to execute |
+| `SP` | 4 bytes | Stack pointer |
+| *(future fields)* | — | Thread state flags, priority, migration info, etc. |
+
+A context switch saves the running thread's registers and `IP`/`SP` into its thread data block, selects the next runnable thread, restores its registers and `IP`/`SP`, and sets its `start_time` to the current time.
 
 ### 3.2 Instruction Encoding
 
@@ -311,7 +342,7 @@ These items need resolution before or during initial implementation:
 8. ~~**Addressing mode table**~~ — **resolved**: IMM (0x0, 4 bytes), REG (0x1, 1 byte), IND (0x2, 1 byte), IDX (0x3, 5 bytes), DIR (0x4, 4 bytes); 0x5–0xF reserved (see §3.2.4).
    - ~~Remaining sub-question: number of registers~~ — **resolved**: 8 registers (`R0`–`R7`), index range 0–7 (see §3.2.5).
 9. **Lock implementation** — centralized lock server on the Controller Node? Token-ring? Distributed algorithm (e.g., Lamport)?
-10. **Periodic switch interval** — instruction count threshold for cooperative yield?
+10. ~~**Periodic switch interval**~~ — **resolved**: 2 ms time slice; checked before each instruction using `start_time` stored in thread data; reset on every resume (see §3.1).
 11. ~~**Version number format**~~ — **resolved**: single unsigned integer, exact match required (see §4.2).
 12. ~~**Controller Node identity**~~ — **resolved**: zero pre-configuration on both sides; Controller hears PICO heartbeats, checks version, and replies with `CONTROLLER_ANNOUNCE` only to matching nodes; PICO then opens a persistent TCP connection (see §4.3.2).
     - **Remaining sub-question**: `CONTROLLER_ANNOUNCE` wire format — what fields beyond IP and file API port?
