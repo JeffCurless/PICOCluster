@@ -30,7 +30,50 @@ Each PICO W runs an interpreter that fetches, decodes, and executes PCode byteco
 - The interpreter performs a **periodic thread switch** at a configurable interval (e.g., every N instructions).
 - Any instruction that blocks waiting for a resource (I/O, lock, network) triggers an **immediate thread switch** rather than stalling the node.
 
-### 3.2 Instruction Set (preliminary)
+### 3.2 Instruction Encoding
+
+Each instruction is laid out in memory as:
+
+```
+[ OPCODE (1 byte) ] [ ADDR_MODE ... (1 or 2 bytes) ] [ OPERAND ... (0–32 bytes) ]
+```
+
+#### 3.2.1 Opcode byte
+
+One byte → 256 distinct instructions. The main fetch-decode-execute loop reads a single byte and dispatches immediately to the handler for that instruction. Because the handler knows the instruction's operand count, it then pulls exactly the right number of addressing-mode and operand bytes. This keeps the dispatch path minimal and fast.
+
+#### 3.2.2 Addressing mode byte(s)
+
+Each addressing mode byte encodes two operand modes, one per nibble (4 bits each → **16 addressing modes** per operand slot):
+
+```
+  Bits 7–4 : addressing mode for operand N
+  Bits 3–0 : addressing mode for operand N+1  (zero if operand N+1 does not exist)
+```
+
+| Operand count | Addressing mode bytes |
+|:---:|:---:|
+| 0 | 0 |
+| 1 | 1 (high nibble = mode, low nibble = 0x0) |
+| 2 | 1 (high nibble = mode₁, low nibble = mode₂) |
+| 3 | 2 (byte 0: modes 1 & 2; byte 1: high nibble = mode₃, low nibble = 0x0) |
+| 4 | 2 (byte 0: modes 1 & 2; byte 1: modes 3 & 4) |
+
+#### 3.2.3 Operands
+
+Operand bytes follow the addressing mode byte(s) in left-to-right operand order. The addressing mode for each operand determines how many bytes it consumes. The maximum operand size is **8 bytes** (64-bit value), giving a worst-case instruction length of:
+
+```
+1 (opcode) + 2 (addr mode) + 4 × 8 (operands) = 35 bytes
+```
+
+Instruction size range: **1 byte** (opcode only, no operands) to **35 bytes** (4 × 8-byte operands).
+
+#### 3.2.4 Addressing modes (TBD)
+
+The 16 mode values per nibble are not yet assigned. Candidates include immediate, register, direct memory, indirect, indexed, and others. See [Open Questions](#6-open-questions).
+
+#### 3.2.5 Instruction set (preliminary)
 
 | Category       | Instructions                                      |
 |----------------|---------------------------------------------------|
@@ -40,8 +83,6 @@ Each PICO W runs an interpreter that fetches, decodes, and executes PCode byteco
 | I/O            | `PRINT`, `MESSAGE`                                |
 | Memory/sync    | TBD — load/store ops, lock/unlock primitives      |
 | Network/file   | TBD — read/send operations over TCP/IP or UDP     |
-
-The binary encoding (opcode width, operand layout, calling convention) is not yet defined — see [Open Questions](#6-open-questions).
 
 ---
 
@@ -69,9 +110,29 @@ Messages are sent over UDP broadcast so no prior knowledge of peer addresses is 
 
 #### Neighbor table
 
-Each node maintains a **bounded neighbor table** — a fixed-size list of the most recently heard-from peers. When the table is full and a new node announces itself, the oldest (or least recently heard) entry is evicted. This cap limits cluster complexity and memory use on constrained hardware.
+Each PICO node maintains a **bounded neighbor table** — a fixed-size list of peers it currently considers reachable and usable for thread migration. The table size defaults to **8 entries** and is configurable.
 
-The neighbor table size defaults to **8 entries** and is configurable. This fits comfortably in PICO W RAM and sets the practical maximum number of peers any single node actively tracks.
+The table represents *usable* neighbors, not merely known ones. Entries are evicted by the following rules, evaluated in priority order when a slot is needed or on each heartbeat tick:
+
+| Priority | Condition | Action |
+|---|---|---|
+| 1 (highest) | No heartbeat received for **3 × broadcast interval** | Evict immediately — node is considered dead or stuck |
+| 2 | Node has been in the table for longer than a configured **residency timeout** AND its load is at or above the **full-load threshold** | Evict — node is persistently saturated and unlikely to accept work; free the slot for a more useful neighbor |
+| 3 | Table is full and a new node announces itself | Evict the entry that best matches priority 2 criteria, or failing that the least-recently-updated entry |
+
+Key points:
+- **Dead node recovery**: The 3× timeout ensures the table self-heals when a node crashes or freezes, without any central coordinator.
+- **Load-based rotation**: A persistently saturated neighbor is only useful as a fallback; evicting it lets a fresher, lighter node into the table and keeps the neighbor list actionable for thread dispatch.
+- **Configurable thresholds**: The residency timeout and full-load threshold (e.g., CPU ≥ 90%, or free memory below a floor) are tunable parameters, not hard-coded constants.
+
+#### Neighbor table — Controller Node behavior
+
+The Controller Node is **not subject to these eviction rules**. It:
+- Tracks every node it has ever seen, without a size cap.
+- Retains the last known state of any node that goes silent (marked **stale** but not deleted).
+- Stale entries are only purged by explicit user action from the dashboard.
+
+This gives the Controller a complete historical picture of the cluster — including nodes that crashed or were removed — while each PICO's neighbor table stays lean and contains only nodes worth dispatching work to.
 
 #### Broadcast interval
 
@@ -165,14 +226,19 @@ Shared memory is modeled as named "files" stored on the central host. Any node r
 These items need resolution before or during initial implementation:
 
 1. **Implementation language** — MicroPython (easier iteration) vs. C with the Pico SDK (lower overhead, faster interpreter)?
-2. **Bytecode encoding** — opcode byte width, operand format, endianness, calling convention?
+2. ~~**Bytecode encoding**~~ — **resolved**: 1-byte opcode, 0–2 addressing-mode bytes (4 bits per operand), 0–4 operands up to 8 bytes each; 1–35 bytes per instruction (see §3.2).
+   - **Remaining sub-question**: endianness of multi-byte operands (little-endian preferred for PICO / ARM, but not yet locked in).
+   - **Remaining sub-question**: the 16 addressing mode encodings — see item below.
 3. ~~**Node discovery protocol**~~ — **resolved**: UDP broadcast heartbeats; each node listens and maintains a bounded neighbor table (see §4.2).
 4. ~~**Neighbor table size limit**~~ — **resolved**: default **8 entries**, configurable (see §4.2).
 5. **Heartbeat broadcast interval** — exact interval in milliseconds? Tradeoff between discovery latency and WiFi traffic.
-6. **Thread migration protocol** — serialization format for code segment, operand stack, and local variables during handoff?
-7. **Lock implementation** — centralized lock server on the Controller Node? Token-ring? Distributed algorithm (e.g., Lamport)?
-8. **Periodic switch interval** — instruction count threshold for cooperative yield?
-9. **Controller Node identity** — is the Controller's address static/pre-configured on each PICO, or announced via a special heartbeat field?
-10. **File API wire format** — message framing, encoding (binary vs. text), and error responses for OPEN/READ/WRITE/CLOSE/LIST?
-11. **Dashboard technology** — what UI framework/language for the Controller dashboard (web app, native GUI, terminal UI)?
-12. **Program dispatch acknowledgement** — how does the Controller know a dispatched program was received and started successfully?
+   - Dead-node timeout is derived from this value (3× interval), so the interval also controls how quickly a crashed node is evicted.
+6. **Full-load threshold** — what CPU load % and/or free memory floor defines "fully loaded" for eviction purposes?
+7. **Residency timeout** — how long must a node be in the table while fully loaded before it becomes a candidate for load-based eviction?
+8. **Addressing mode table** — define all 16 mode encodings (e.g., immediate, register, direct, indirect, indexed, …) and the operand byte size each implies.
+10. **Lock implementation** — centralized lock server on the Controller Node? Token-ring? Distributed algorithm (e.g., Lamport)?
+11. **Periodic switch interval** — instruction count threshold for cooperative yield?
+12. **Controller Node identity** — is the Controller's address static/pre-configured on each PICO, or announced via a special heartbeat field?
+13. **File API wire format** — message framing, encoding (binary vs. text), and error responses for OPEN/READ/WRITE/CLOSE/LIST?
+14. **Dashboard technology** — what UI framework/language for the Controller dashboard (web app, native GUI, terminal UI)?
+15. **Program dispatch acknowledgement** — how does the Controller know a dispatched program was received and started successfully?
