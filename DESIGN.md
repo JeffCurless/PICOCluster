@@ -148,7 +148,26 @@ Instruction size range: **1 byte** (opcode only, no operands) to **23 bytes** (4
 
 ### 4.1 WiFi Configuration
 
-Each PICO W stores its WiFi credentials (SSID and PASSWORD) in a local configuration file. At boot the node connects to the shared WiFi network.
+Each PICO W stores **all of its configuration in a single local file** on its flash. This includes WiFi credentials (SSID, PASSWORD) and every tunable cluster parameter: heartbeat interval, full-load thresholds (CPU and memory), neighbor table size, residency timeout, and any future settings. Consolidating everything into one file has two benefits:
+
+1. A node only needs to read one place at boot to be fully configured.
+2. The Controller can push an updated config file to any or all nodes using the file-distribution message (see §4.3.4), triggering a rolling configuration upgrade on the next reboot of each node.
+
+The config file uses a **flat key=value format** (INI-style, but with no sections). Example:
+
+```
+SSID=mywifi
+PASSWORD=secret
+HEARTBEAT_INTERVAL_MS=500
+FULL_LOAD_CPU_PCT=80
+FULL_LOAD_MEM_PCT=80
+NEIGHBOR_TABLE_SIZE=8
+```
+
+No section headers (`[section]`) are used — the file is a plain list of `key=value` pairs, one per line. Comments may use `#`. This keeps the format simple in both target implementations:
+
+- **MicroPython**: the file can be structured as a plain Python module (`KEY = value`) and imported directly — no parser needed at all.
+- **C (Pico SDK)**: a stateless line-by-line parser suffices; no section state needs to be tracked. Each line is split on `=`, whitespace trimmed, and the key looked up in a fixed table.
 
 ### 4.2 Node Heartbeat / Discovery
 
@@ -182,7 +201,7 @@ The table represents *usable* neighbors, not merely known ones. Entries are evic
 Key points:
 - **Dead node recovery**: The 3× timeout ensures the table self-heals when a node crashes or freezes, without any central coordinator.
 - **Load-based rotation**: A persistently saturated neighbor is only useful as a fallback; evicting it lets a fresher, lighter node into the table and keeps the neighbor list actionable for thread dispatch.
-- **Configurable thresholds**: The residency timeout and full-load threshold (e.g., CPU ≥ 90%, or free memory below a floor) are tunable parameters, not hard-coded constants.
+- **Configurable thresholds**: The residency timeout and full-load threshold are tunable parameters, not hard-coded constants. Initial defaults: **CPU utilization ≥ 80%** OR **memory utilization ≥ 80%** (either condition alone is sufficient to flag a node as fully loaded). The memory threshold in particular is expected to be revisited once typical PCode program sizes are known.
 
 #### Neighbor table — Controller Node behavior
 
@@ -195,9 +214,11 @@ This gives the Controller a complete historical picture of the cluster — inclu
 
 #### Broadcast interval
 
-Broadcasts are sent at a **short, fixed interval** (exact value TBD) so that:
+Broadcasts are sent every **500 milliseconds**. This interval balances two requirements:
 - A new node joining the network hears from all active peers within a few seconds.
 - The thread-migration subsystem always has a fresh view of cluster load.
+
+The dead-node eviction timeout (3× interval) is therefore **1.5 seconds**.
 
 ### 4.3 Controller Node
 
@@ -279,14 +300,47 @@ The Controller listens to the same UDP heartbeat broadcasts that the PICO nodes 
 
 Unlike PICO nodes, the Controller is not bounded by an 8-entry neighbor table — it tracks every node it can hear, regardless of version.
 
-#### 4.3.4 Program Dispatch
+#### 4.3.4 Controller→PICO Message System
 
-The Controller can **send PCode programs to any node** for execution. This provides a single point of control for launching workloads across the cluster without needing direct access to individual PICOs.
+The existing TCP connection between the Controller and each PICO (established during bootstrap, §4.3.2) is a **bidirectional message channel**. The Controller sends typed messages to PICO nodes; each message requires an acknowledgement response. This is the mechanism for both program dispatch and file distribution.
 
-Dispatch flow (details TBD):
-1. User selects a program and a target node (or "any available node") in the dashboard.
-2. Controller transmits the PCode binary to the target node over TCP.
-3. Target node loads the program and begins execution; the Controller monitors progress via subsequent heartbeats.
+##### Defined message types
+
+| Message | Direction | Description |
+|---|---|---|
+| `EXEC_PROGRAM` | Controller → PICO | Deliver a PCode binary and begin executing it immediately |
+| `STORE_FILE` | Controller → PICO | Write a named file to the PICO's local flash storage |
+
+Additional message types are expected as the design matures.
+
+##### Acknowledgement semantics
+
+Every Controller→PICO message follows a two-phase acknowledgement:
+
+| Response | Meaning |
+|---|---|
+| `LOADING` | PICO has received the message and has begun processing (receiving the payload, writing to flash, etc.) |
+| `DONE` | Processing completed successfully |
+| `ERROR` | Processing failed; payload contains a short reason string |
+
+The Controller tracks outstanding acknowledgements per node and surfaces the status in the dashboard (see §4.3.5).
+
+##### Program dispatch flow
+
+1. User selects a PCode binary and a target node (or "any available node") in the dashboard.
+2. Controller sends `EXEC_PROGRAM` to the target node over TCP.
+3. PICO replies `LOADING`, then `DONE` once the program is running.
+4. The Controller monitors ongoing health via subsequent heartbeats.
+
+##### File distribution and rolling configuration upgrade
+
+The `STORE_FILE` message allows the Controller to push any file — including the node's config file — to a PICO's local flash:
+
+1. Controller sends `STORE_FILE` with the target filename and content.
+2. PICO replies `LOADING`, writes the file to local flash, then replies `DONE`.
+3. The new file takes effect on the **next reboot** of that node.
+
+When the Controller distributes an updated config file to all active nodes, each node will pick up the new configuration as it naturally reboots (or is rebooted by the operator). Because nodes reboot independently, this constitutes a **rolling configuration upgrade** with no coordinated cluster downtime.
 
 #### 4.3.5 Dashboard GUI
 
@@ -299,7 +353,7 @@ The Controller runs a graphical dashboard providing a real-time view of the clus
 | **Memory** | Free/used memory per active node |
 | **Shared files** | List of files currently hosted on the Controller; open handles |
 | **Shared memory** | Active shared-memory regions and which nodes are accessing them |
-| **Program dispatch** | UI to select a PCode binary and send it to one or all active nodes |
+| **Dispatch** | UI to send messages to one or all active nodes: execute a PCode program (`EXEC_PROGRAM`) or push a file to local flash (`STORE_FILE`); shows per-node acknowledgement status (`LOADING` / `DONE` / `ERROR`) |
 | **Quarantine list** | PICOs running an incompatible version — node ID, IP, reported version, last seen; operator can initiate a firmware update from here |
 
 The dashboard is a read/write interface — it can observe the cluster and also act on it (dispatch programs, inspect or modify shared files).
@@ -335,9 +389,8 @@ These items need resolution before or during initial implementation:
    - **Remaining sub-question**: endianness of multi-byte operands (little-endian preferred for PICO W / ARM Cortex-M33, but not yet locked in).
 3. ~~**Node discovery protocol**~~ — **resolved**: UDP broadcast heartbeats; each node listens and maintains a bounded neighbor table (see §4.2).
 4. ~~**Neighbor table size limit**~~ — **resolved**: default **8 entries**, configurable (see §4.2).
-5. **Heartbeat broadcast interval** — exact interval in milliseconds? Tradeoff between discovery latency and WiFi traffic.
-   - Dead-node timeout is derived from this value (3× interval), so the interval also controls how quickly a crashed node is evicted.
-6. **Full-load threshold** — what CPU load % and/or free memory floor defines "fully loaded" for eviction purposes?
+5. ~~**Heartbeat broadcast interval**~~ — **resolved**: **500 ms**; dead-node eviction timeout is 3× = **1.5 s** (see §4.2).
+6. ~~**Full-load threshold**~~ — **resolved**: **CPU utilization ≥ 80%** OR **memory utilization ≥ 80%** (either alone is sufficient); both are tunable defaults. Memory threshold expected to be revisited once typical PCode program sizes are known (see §4.2).
 7. **Residency timeout** — how long must a node be in the table while fully loaded before it becomes a candidate for load-based eviction?
 8. ~~**Addressing mode table**~~ — **resolved**: IMM (0x0, 4 bytes), REG (0x1, 1 byte), IND (0x2, 1 byte), IDX (0x3, 5 bytes), DIR (0x4, 4 bytes); 0x5–0xF reserved (see §3.2.4).
    - ~~Remaining sub-question: number of registers~~ — **resolved**: 8 registers (`R0`–`R7`), index range 0–7 (see §3.2.5).
@@ -348,4 +401,5 @@ These items need resolution before or during initial implementation:
     - **Remaining sub-question**: `CONTROLLER_ANNOUNCE` wire format — what fields beyond IP and file API port?
 13. **File API wire format** — message framing, encoding (binary vs. text), and error responses for OPEN/READ/WRITE/CLOSE/LIST?
 14. **Dashboard technology** — what UI framework/language for the Controller dashboard (web app, native GUI, terminal UI)?
-15. **Program dispatch acknowledgement** — how does the Controller know a dispatched program was received and started successfully?
+15. ~~**Program dispatch acknowledgement**~~ — **resolved**: the dispatch mechanism is a general Controller→PICO message system over the existing TCP connection; every message receives a two-phase `LOADING` → `DONE` (or `ERROR`) acknowledgement (see §4.3.4). Wire format of messages and acknowledgements is TBD (see #13).
+16. ~~**Config file format**~~ — **resolved**: flat `key=value` format (INI-style, no sections); `#` for comments. In MicroPython the file can double as an importable module; in C a stateless line-by-line parser suffices (see §4.1).
