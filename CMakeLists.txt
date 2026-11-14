@@ -46,6 +46,9 @@ if(NOT PICO_BOARD IN_LIST PICOCLUSTER_SUPPORTED_BOARDS)
         "Supported: ${PICOCLUSTER_SUPPORTED_BOARDS} (use -DPICO_BOARD=picow).")
 endif()
 
+# compile_commands.json for clangd (.clangd points at builds/picow_D).
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Use the SDK import helper shipped with picoOS rather than a copy.
 include(${CMAKE_CURRENT_SOURCE_DIR}/picoOS/pico_sdk_import.cmake)
 
@@ -63,6 +66,10 @@ set(CLUSTER_VER_MINOR 0)
 set(CLUSTER_VER_EDIT  1)
 set(PICOCLUSTER_VERSION "${CLUSTER_VER_MAJOR}.${CLUSTER_VER_MINOR}.${CLUSTER_VER_EDIT}")
 message(STATUS "picoCluster version   : ${PICOCLUSTER_VERSION}")
+
+# Largest cluster task argument / result in bytes.  Part of the build id, so
+# every node must use the same value.  More head room on Pico 2 W later.
+set(CLUSTER_MAX_PAYLOAD 512)
 
 # ---------------------------------------------------------------------------
 # picoOS feature configuration
@@ -83,11 +90,23 @@ set(PICOOS_INCLUDE_DEMO_APPS OFF)
 
 # Absolute paths are required — picoOS/src resolves relative paths against
 # its own directory.
-set(PICOOS_APP_SOURCES
-    ${CMAKE_CURRENT_SOURCE_DIR}/apps/app_table.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/apps/cluster.c
+set(PICOCLUSTER_LAYER_SOURCES
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/proto.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/net.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/node.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/exec.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/rpc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/clusterd.c
 )
+set(PICOOS_APP_SOURCES
+    ${PICOCLUSTER_LAYER_SOURCES}
+    ${CMAKE_CURRENT_SOURCE_DIR}/apps/app_table.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/apps/cluster_tasks.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/apps/cpi.c
+)
+# The project root makes "cluster/..." includes resolve; apps/ for app headers.
 set(PICOOS_APP_INCLUDE_DIRS
+    ${CMAKE_CURRENT_SOURCE_DIR}
     ${CMAKE_CURRENT_SOURCE_DIR}/apps
 )
 
@@ -105,7 +124,7 @@ set_source_files_properties(${PICOOS_APP_SOURCES}
     PROPERTIES
     COMPILE_OPTIONS "${PICOOS_WARNINGS}"
     COMPILE_DEFINITIONS
-        "CLUSTER_VER_MAJOR=${CLUSTER_VER_MAJOR};CLUSTER_VER_MINOR=${CLUSTER_VER_MINOR};CLUSTER_VER_EDIT=${CLUSTER_VER_EDIT}")
+        "CLUSTER_VER_MAJOR=${CLUSTER_VER_MAJOR};CLUSTER_VER_MINOR=${CLUSTER_VER_MINOR};CLUSTER_VER_EDIT=${CLUSTER_VER_EDIT};CLUSTER_MAX_PAYLOAD=${CLUSTER_MAX_PAYLOAD}u")
 
 # ---------------------------------------------------------------------------
 # Output naming — replaces picoOS's own name (e.g. picowos_D-v0.4.1).

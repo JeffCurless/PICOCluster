@@ -3,7 +3,7 @@
 #         Both directories (and their .gitkeep files) are kept.
 #
 # Usage:
-#   ./clean           empty builds/ and remove kits/*.uf2
+#   ./clean           empty builds/, remove tests/build and kits/*.uf2
 #   ./clean builds    empty builds/ only (keep the kit images)
 
 cd "$(dirname "$0")" || exit 1
@@ -14,6 +14,11 @@ for d in builds/*/; do
     echo "Removing ${d%/}"
     rm -rf "$d"
 done
+
+if [ -d tests/build ]; then
+    echo "Removing tests/build"
+    rm -rf tests/build
+fi
 
 if [ "${1:-}" != "builds" ]; then
     for f in kits/*.uf2; do

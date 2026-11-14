@@ -3,6 +3,7 @@ builds/*
 !builds/.gitkeep
 kits/*
 !kits/.gitkeep
+tests/build/
 
 # Editor artefacts
 .vscode/
