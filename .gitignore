@@ -1,0 +1,12 @@
+# Build areas
+builds/*
+!builds/.gitkeep
+kits/*
+!kits/.gitkeep
+
+# Editor artefacts
+.vscode/
+.idea/
+*.swp
+*~
+.cache/

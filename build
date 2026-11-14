@@ -1,0 +1,61 @@
+#!/usr/bin/bash
+# build — compile picoCluster firmware variants into builds/ and collect the
+#         .uf2 images in kits/.
+#
+# Usage:
+#   ./build           build every variant          (same as "all")
+#   ./build all       build every variant
+#   ./build D         Pico W + Display Pack        (240x135)
+#   ./build D2        Pico W + Display Pack 2      (320x240)
+#
+# Build tree:   builds/<board>_<display>/   e.g. builds/picow_D
+# Output:       kits/picocluster_<display>-v<CLUSTER_VER_MAJOR.MINOR.EDIT>.uf2
+#
+# Override the SDK path: PICO_SDK_PATH=/path/to/pico-sdk ./build
+
+set -u
+cd "$(dirname "$0")" || exit 1
+
+SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
+JOBS="$(nproc)"
+BOARD="picow"          # Pico 2 W support to be added later
+
+case "${1:-all}" in
+    all) VARIANTS="D D2" ;;
+    D)   VARIANTS="D" ;;
+    D2)  VARIANTS="D2" ;;
+    *)
+        echo "Usage: $0 [all|D|D2]" >&2
+        exit 1
+        ;;
+esac
+
+if [ ! -f picoOS/src/CMakeLists.txt ]; then
+    echo "picoOS submodule missing — run: git submodule update --init" >&2
+    exit 1
+fi
+
+fail() {
+    echo "" >&2
+    echo "BUILD FAILED: $1" >&2
+    exit 1
+}
+
+build_variant() {
+    local disp="$1"
+    local flags=""
+    [ "$disp" = "D2" ] && flags="-DPICOOS_DISPLAY_PACK2=ON"
+
+    local dir="builds/${BOARD}_${disp}"
+    echo "--- ${BOARD} / ${disp} ---"
+    cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$BOARD" $flags || return 1
+    make -j"$JOBS" -C "$dir"                                              || return 1
+}
+
+for disp in $VARIANTS; do
+    build_variant "$disp" || fail "${BOARD} / ${disp}"
+done
+
+echo ""
+echo "Done. kits/ contents:"
+ls -1 kits/*.uf2

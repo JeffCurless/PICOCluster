@@ -1,0 +1,24 @@
+#!/usr/bin/bash
+# clean — empty the build tree (builds/) and remove the firmware images in kits/.
+#         Both directories (and their .gitkeep files) are kept.
+#
+# Usage:
+#   ./clean           empty builds/ and remove kits/*.uf2
+#   ./clean builds    empty builds/ only (keep the kit images)
+
+cd "$(dirname "$0")" || exit 1
+
+# Remove every build directory but keep builds/ itself (and its .gitkeep).
+for d in builds/*/; do
+    [ -d "$d" ] || continue
+    echo "Removing ${d%/}"
+    rm -rf "$d"
+done
+
+if [ "${1:-}" != "builds" ]; then
+    for f in kits/*.uf2; do
+        [ -e "$f" ] || continue
+        echo "Removing $f"
+        rm -f "$f"
+    done
+fi
