@@ -41,6 +41,22 @@ git submodule update --init
 
 `PICO_SDK_PATH` selects the SDK. The default is `~/workspace/pico-sdk`.
 
+Pico SDK 2.3.1 requires picotool 2.3.0 and finds it through CMake, not `PATH`
+(the apt package is 2.1.1 and fails with "Incompatible picotool installation
+found"). `./build` uses `~/workspace/picotool-install` when it exists; set
+`PICOTOOL_FETCH_FROM_GIT_PATH` to use another location. To build a matching
+picotool:
+
+```bash
+git clone --branch 2.3.0 https://github.com/raspberrypi/picotool.git
+cmake -S picotool -B picotool/build -DPICO_SDK_PATH=$PICO_SDK_PATH \
+      -DPICOTOOL_FLAT_INSTALL=1 \
+      -DCMAKE_INSTALL_PREFIX=$HOME/workspace/picotool-install
+make -C picotool/build install
+```
+
+Install `libusb-1.0-0-dev` first if picotool should also talk to a board over USB.
+
 ## Setting up a node
 
 Flash the same `.uf2` to every board. Then give each board a `config.txt` on its

@@ -15,11 +15,20 @@
 # Output:       kits/picocluster_<display>-v<CLUSTER_VER_MAJOR.MINOR.EDIT>.uf2
 #
 # Override the SDK path: PICO_SDK_PATH=/path/to/pico-sdk ./build
+# Override picotool:     PICOTOOL_FETCH_FROM_GIT_PATH=/path/to/picotool-install ./build
 
 set -u
 cd "$(dirname "$0")" || exit 1
 
 SDK="${PICO_SDK_PATH:-$HOME/workspace/pico-sdk}"
+
+# The SDK insists on a matching picotool version and finds it through its
+# CMake package config, not PATH. Use a locally built picotool when one is
+# installed (flat install: <dir>/picotool/picotoolConfig.cmake).
+# Override: PICOTOOL_FETCH_FROM_GIT_PATH=/path/to/picotool-install ./build
+if [ -z "${PICOTOOL_FETCH_FROM_GIT_PATH:-}" ] && [ -d "$HOME/workspace/picotool-install/picotool" ]; then
+    export PICOTOOL_FETCH_FROM_GIT_PATH="$HOME/workspace/picotool-install"
+fi
 JOBS="$(nproc)"
 BOARD="picow"          # Pico 2 W support to be added later
 
