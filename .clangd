@@ -1,2 +1,8 @@
+# clangd setup for the firmware sources.  The compile commands come from the
+# Display Pack build; the ARM newlib headers are added because clangd does not
+# ask arm-none-eabi-gcc for its system include path.
 CompileFlags:
   CompilationDatabase: builds/picow_D
+  Add:
+    - --target=arm-none-eabi
+    - -isystem/usr/lib/arm-none-eabi/include

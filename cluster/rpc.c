@@ -65,6 +65,9 @@ static void finish(cl_pending_t *p, int32_t status, int32_t err,
             p->err = CLUSTER_ERR_NOMEM;
         }
     }
+    if (p->err == CLUSTER_OK) {
+        cl_stat_reqs_done++;
+    }
     p->state = CL_P_DONE;
     ksemaphore_signal(&p->done);
 }

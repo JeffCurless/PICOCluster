@@ -16,6 +16,7 @@
 #include "cluster/net.h"
 #include "cluster/node.h"
 #include "cluster/rpc.h"
+#include "cluster/status.h"
 
 #include "kernel/mem.h"
 #include "kernel/sync.h"
@@ -31,6 +32,8 @@
 uint16_t cl_self_id;
 uint32_t cl_build_id;
 uint8_t  cl_tx_buf[CL_MAX_PKT];
+uint32_t cl_stat_tasks_run;
+uint32_t cl_stat_reqs_done;
 
 static kmutex_t          g_lock;
 static volatile bool     g_running;
@@ -369,18 +372,23 @@ void clusterd_entry(void *arg)
     cl_build_id = compute_build_id();
     kmutex_init(&g_lock);
     shell_register_cmd(&g_cluster_cmd);
+    cl_status_start();      /* keeps showing the phase even if we stop below */
 
     cl_config_t cfg;
     if (cl_config_load(&cfg) != 0) {
+        cl_status_set_phase(CL_PHASE_NO_CONFIG);
         return;
     }
     cl_self_id = (uint16_t)cfg.nodeid;
 
+    cl_status_set_phase(CL_PHASE_WIFI);
     if (cl_wifi_up(&cfg) != 0) {
+        cl_status_set_phase(CL_PHASE_WIFI_FAIL);
         CL_LOG("WiFi join failed — clusterd stopped\r\n");
         return;
     }
     if (cl_net_open() != 0) {
+        cl_status_set_phase(CL_PHASE_NET_FAIL);
         CL_LOG("network setup failed — clusterd stopped\r\n");
         return;
     }
@@ -391,6 +399,7 @@ void clusterd_entry(void *arg)
     cl_recent_init(&g_recent);
     g_next_hello_us = 0u;
     g_running = true;
+    cl_status_set_phase(CL_PHASE_RUNNING);
     CL_LOG("node %u up at %s, build %08lx, %d workers\r\n",
            (unsigned)cl_self_id, wifi_get_ip_str(),
            (unsigned long)cl_build_id, CL_MAX_WORKERS);

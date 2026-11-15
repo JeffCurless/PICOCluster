@@ -97,6 +97,7 @@ set(PICOCLUSTER_LAYER_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/cluster/exec.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cluster/rpc.c
     ${CMAKE_CURRENT_SOURCE_DIR}/cluster/clusterd.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/cluster/status.c
 )
 set(PICOOS_APP_SOURCES
     ${PICOCLUSTER_LAYER_SOURCES}

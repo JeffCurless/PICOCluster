@@ -47,6 +47,7 @@ typedef struct {
     uint32_t              pid;
     uint8_t               tries;       /* RESULT sends                */
     uint64_t              next_tx_us;
+    uint64_t              started_us;
 } cl_job_t;
 
 const cluster_task_t *cl_task_find(const char *name);

@@ -132,6 +132,8 @@ int cl_exec_start(uint32_t req_id, uint16_t origin, const cluster_task_t *task,
         cl_exec_free(j);
         return CLUSTER_ERR_BUSY;
     }
+    j->started_us = cl_now_us();
+    cl_stat_tasks_run++;
     return CLUSTER_OK;
 }
 

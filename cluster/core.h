@@ -34,6 +34,10 @@ bool cl_running(void);
 void cl_lock(void);
 void cl_unlock(void);
 
+/* Activity counters (for the status page); updated under cl_lock. */
+extern uint32_t cl_stat_tasks_run;   /* tasks started on this node        */
+extern uint32_t cl_stat_reqs_done;   /* our requests completed with OK    */
+
 /* Transmit buffer shared by every sender; only touch it under cl_lock. */
 extern uint8_t cl_tx_buf[CL_MAX_PKT];
 

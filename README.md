@@ -71,6 +71,24 @@ cluster run echo hi 1    ...on node 1
 run cpi 12           distributed Monte Carlo pi with 12 threads
 ```
 
+### Display Pack status page
+
+While clusterd runs, the panel shows:
+
+- **Title bar:** the node id and the picoCluster version.
+- **Network line:** the IP and node count. Before clusterd is up, this shows
+  the startup or error state instead: joining WiFi, config missing, or WiFi
+  failed.
+- **NODES:** one row per node: id, IP, and a box for each worker slot.
+  Orange filled boxes are busy, green outlines are free. This node is marked
+  `*`. A node running different firmware shows `build?`.
+- **THIS NODE:** each local worker, with its task, the node that created it,
+  and how long it has been running.
+- **Footer:** requests outstanding, tasks run here, and results received.
+
+The Display Pack LED shows the same state: yellow while starting, green when
+idle, blue while running tasks, red on error.
+
 ## How it works
 
 - **Discovery.** Each node multicasts a HELLO every second to
