@@ -64,7 +64,7 @@ pico_sdk_init()
 # ---------------------------------------------------------------------------
 set(CLUSTER_VER_MAJOR 0)
 set(CLUSTER_VER_MINOR 0)
-set(CLUSTER_VER_EDIT  3)
+set(CLUSTER_VER_EDIT  5)
 set(PICOCLUSTER_VERSION "${CLUSTER_VER_MAJOR}.${CLUSTER_VER_MINOR}.${CLUSTER_VER_EDIT}")
 message(STATUS "picoCluster version   : ${PICOCLUSTER_VERSION}")
 
@@ -89,8 +89,13 @@ endif()
 set(PICOOS_DISPLAY_ENABLE ON)
 set(PICOOS_DISPLAY_PACK2  OFF)
 
+# picoCluster uses WiFi only.  Dropping BTstack saves ~63 KB of flash and
+# ~14 KB of static SRAM (plus BTstack's run-time malloc use).
+set(PICOOS_BT_ENABLE OFF)
+
 # picoOS demo apps (producer/consumer/sensor/pi/scantest/cray-one) are
-# excluded; picoCluster supplies its own app table.
+# excluded; picoCluster supplies its own app table.  cray-one is kept as a
+# picoCluster copy in apps/ because it is being removed from picoOS.
 set(PICOOS_INCLUDE_DEMO_APPS OFF)
 
 # Absolute paths are required — picoOS/src resolves relative paths against
@@ -109,6 +114,7 @@ set(PICOOS_APP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/app_table.c
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/cluster_tasks.c
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/cpi.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/apps/cray_one.c
 )
 # The project root makes "cluster/..." includes resolve; apps/ for app headers.
 set(PICOOS_APP_INCLUDE_DIRS
