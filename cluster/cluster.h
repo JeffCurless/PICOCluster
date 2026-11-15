@@ -13,6 +13,7 @@
  * boot with AUTORUN=clusterd in config.txt.
  *
  * Every created thread must be joined exactly once; joining frees its slot.
+ * cluster_thread_kill() stops a thread early; it must still be joined.
  */
 
 #ifndef CLUSTER_H
@@ -25,6 +26,9 @@
 #include "cluster/proto.h"         /* CLUSTER_MAX_PAYLOAD */
 
 #define CLUSTER_NODE_ANY        (-1)
+
+/* Most threads one node can have created and not yet joined. */
+#define CLUSTER_MAX_PENDING     32
 
 /* Error codes (all negative). */
 #define CLUSTER_OK              0
@@ -60,6 +64,16 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
  */
 int cluster_thread_join(cluster_thread_t *t, void *ret, size_t ret_max,
                         size_t *ret_len, int *status, uint32_t timeout_ms);
+
+/*
+ * Stop the task.  The request completes at once with CLUSTER_ERR_KILLED, so
+ * a pending (or later) cluster_thread_join() returns that error; the handle
+ * must still be joined to release it.  The worker process is killed and its
+ * result discarded.  If the task has already finished, nothing changes and
+ * join returns its result.  CLUSTER_OK, CLUSTER_ERR_ARG (unknown handle) or
+ * CLUSTER_ERR_NOTRUNNING.
+ */
+int cluster_thread_kill(cluster_thread_t *t);
 
 int         cluster_self(void);          /* this node's NODEID, -1 if not running */
 int         cluster_node_count(void);    /* live compatible nodes, self included  */

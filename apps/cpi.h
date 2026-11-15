@@ -6,7 +6,8 @@
  * The main app (cpi_entry) runs on the node it was started on and creates
  * `threads` "pi" cluster tasks, spread over every node with a free worker.
  * Each task throws CPI_SAMPLES random points and returns how many landed
- * inside the quarter circle; the main app sums them and prints pi.
+ * inside the quarter circle; the main app sums them and prints pi and the
+ * time the whole run took.
  */
 
 #ifndef APPS_CPI_H

@@ -13,13 +13,25 @@
 
 #include <string.h>
 
+/* A KILL sent to a remote node, resent until KILL_ACK.  Kept apart from the
+ * pending table because the request itself is finished (and may be joined
+ * and freed) as soon as it is killed. */
+typedef struct {
+    uint32_t req_id;          /* 0 = free */
+    uint16_t node;
+    uint8_t  tries;
+    uint64_t next_tx_us;
+} cl_kill_t;
+
 static cl_pending_t g_pending[CL_MAX_PENDING];
+static cl_kill_t    g_kills[CL_MAX_KILLS];
 static uint16_t     g_seq;
 static uint16_t     g_rr;          /* round-robin cursor for placement */
 
 void cl_rpc_init(void)
 {
     memset(g_pending, 0, sizeof(g_pending));
+    memset(g_kills, 0, sizeof(g_kills));
     g_seq = 0u;
     g_rr  = 0u;
 }
@@ -88,6 +100,20 @@ static void send_spawn(cl_pending_t *p, uint64_t now)
     p->next_tx_us = now + CL_RETRY_US;
 }
 
+static void send_kill(cl_kill_t *k, uint64_t now)
+{
+    const cl_node_t *n = cl_node_find(k->node);
+    if (n != NULL) {
+        size_t len = cl_encode_kill(cl_tx_buf, sizeof(cl_tx_buf), cl_build_id,
+                                    cl_self_id, CL_MSG_KILL, k->req_id);
+        if (len > 0u) {
+            (void)cl_net_send_to(n->ip, cl_tx_buf, len);
+        }
+    }
+    k->tries++;
+    k->next_tx_us = now + CL_RETRY_US;
+}
+
 /* -------------------------------------------------------------------------
  * Events from clusterd
  * ------------------------------------------------------------------------- */
@@ -121,6 +147,15 @@ void cl_rpc_on_spawn_ack(uint32_t req_id, uint8_t code)
     }
 }
 
+void cl_rpc_on_kill_ack(uint32_t req_id)
+{
+    for (int i = 0; i < CL_MAX_KILLS; i++) {
+        if (g_kills[i].req_id == req_id) {
+            g_kills[i].req_id = 0u;
+        }
+    }
+}
+
 void cl_rpc_node_lost(uint16_t node)
 {
     for (int i = 0; i < CL_MAX_PENDING; i++) {
@@ -146,6 +181,15 @@ void cl_rpc_tick(uint64_t now)
         if (p->state != CL_P_DONE && p->state != CL_P_FREE &&
             p->deadline_us != 0u && now >= p->deadline_us) {
             finish(p, 0, CLUSTER_ERR_TIMEOUT, NULL, 0u);
+        }
+    }
+    for (int i = 0; i < CL_MAX_KILLS; i++) {
+        cl_kill_t *k = &g_kills[i];
+        if (k->req_id == 0u || now < k->next_tx_us) continue;
+        if (k->tries >= CL_SPAWN_TRIES || cl_node_find(k->node) == NULL) {
+            k->req_id = 0u;           /* give up: node gone or not answering */
+        } else {
+            send_kill(k, now);
         }
     }
 }
@@ -321,6 +365,54 @@ int cluster_thread_join(cluster_thread_t *t, void *ret, size_t ret_max,
 
     t->req_id = 0u;
     return err;
+}
+
+int cluster_thread_kill(cluster_thread_t *t)
+{
+    if (t == NULL) {
+        return CLUSTER_ERR_ARG;
+    }
+    if (!cl_running()) {
+        return CLUSTER_ERR_NOTRUNNING;
+    }
+    cl_lock();
+    cl_pending_t *p = find(t->req_id);
+    if (p == NULL) {
+        cl_unlock();
+        return CLUSTER_ERR_ARG;
+    }
+    if (p->state == CL_P_DONE) {
+        cl_unlock();
+        return CLUSTER_OK;            /* already finished — keep its result */
+    }
+
+    if (p->node == cl_self_id) {
+        (void)cl_exec_kill(p->req_id);
+    } else {
+        /* SENT or RUNNING: tell the worker.  If the kill table is full the
+         * KILL is still sent once, just not retried. */
+        cl_kill_t spare = { 0u, 0u, 0u, 0u };
+        cl_kill_t *k = &spare;
+        for (int i = 0; i < CL_MAX_KILLS; i++) {
+            if (g_kills[i].req_id == 0u) {
+                k = &g_kills[i];
+                break;
+            }
+        }
+        k->req_id = p->req_id;
+        k->node   = p->node;
+        k->tries  = 0u;
+        send_kill(k, cl_now_us());
+    }
+    finish(p, 0, CLUSTER_ERR_KILLED, NULL, 0u);
+    cl_unlock();
+    return CLUSTER_OK;
+}
+
+int cl_rpc_kill_req(uint32_t req_id)
+{
+    cluster_thread_t t = { req_id, 0 };
+    return cluster_thread_kill(&t);
 }
 
 const char *cluster_strerror(int err)

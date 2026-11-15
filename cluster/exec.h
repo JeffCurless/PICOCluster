@@ -13,17 +13,21 @@
 #ifndef CLUSTER_EXEC_H
 #define CLUSTER_EXEC_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "cluster/cluster_task.h"
 
-/* Per-node worker slots.  A Pico W has MAX_PROCESSES 8: kernel, shell,
- * clusterd and a main app (e.g. cpi) use four, leaving exactly four for
- * workers.  While all four are busy on the node running the main app, no
- * other process (e.g. a shell 'run') can start there. */
+/* Per-node worker slots.  Each worker is one picoOS process and one thread.
+ * picoOS has MAX_PROCESSES 16: kernel, shell, clusterd and a main app (e.g.
+ * cpi) use four, so eight workers still leave four processes free for shell
+ * 'run' on the node running the main app.  Each busy worker also takes
+ * about 2.6 KB of kernel heap (2 KB stack + CLUSTER_MAX_PAYLOAD result
+ * buffer + its argument); eight use about 21 KB of the 96 KB heap.  The
+ * status page draws at most eight slot boxes per node. */
 #ifndef CL_MAX_WORKERS
-#define CL_MAX_WORKERS 4
+#define CL_MAX_WORKERS 8
 #endif
 
 typedef enum {
@@ -31,6 +35,7 @@ typedef enum {
     CL_JOB_RUNNING,      /* task function executing                      */
     CL_JOB_DONE,         /* finished; clusterd has not delivered it yet  */
     CL_JOB_SENDING,      /* RESULT sent to origin, waiting for RESULT_ACK */
+    CL_JOB_KILLING,      /* killed; slot freed once picoOS reaps the process */
 } cl_job_state_t;
 
 typedef struct {
@@ -63,8 +68,15 @@ int       cl_exec_start(uint32_t req_id, uint16_t origin,
                         const cluster_task_t *task,
                         const void *arg, size_t arg_len);
 
-/* Mark RUNNING jobs whose process has disappeared (killed) as DONE with
- * CLUSTER_ERR_KILLED. */
+/* Kill the job for req_id, discarding its result.  A running task's process
+ * is killed and the job stays KILLING (slot and buffers held) until picoOS
+ * has reaped it: a thread running on the other core keeps executing until
+ * it next switches out.  False if no job has that id. */
+bool      cl_exec_kill(uint32_t req_id);
+
+/* Mark RUNNING jobs whose process has disappeared (killed from the shell)
+ * as DONE with CLUSTER_ERR_KILLED, and free KILLING jobs once their process
+ * is gone. */
 void      cl_exec_reap(void);
 
 /* Release a job's memory and slot. */

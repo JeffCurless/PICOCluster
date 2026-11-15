@@ -141,6 +141,20 @@ size_t cl_encode_result_ack(uint8_t *buf, size_t cap, uint32_t build_id,
     return CL_HDR_LEN + CL_RACK_BODY;
 }
 
+size_t cl_encode_kill(uint8_t *buf, size_t cap, uint32_t build_id,
+                      uint16_t node, cl_msg_type_t type, uint32_t req_id)
+{
+    if (type != CL_MSG_KILL && type != CL_MSG_KILL_ACK) {
+        return 0u;
+    }
+    uint8_t *b = put_hdr(buf, cap, type, CL_KILL_BODY, build_id, node);
+    if (b == NULL) {
+        return 0u;
+    }
+    put32(b, req_id);
+    return CL_HDR_LEN + CL_KILL_BODY;
+}
+
 /* -------------------------------------------------------------------------
  * Decoder
  * ------------------------------------------------------------------------- */
@@ -203,6 +217,12 @@ bool cl_decode(const uint8_t *buf, size_t len, cl_msg_t *out)
 
     case CL_MSG_RESULT_ACK:
         if (body_len != CL_RACK_BODY) return false;
+        out->req_id = get32(b);
+        return true;
+
+    case CL_MSG_KILL:
+    case CL_MSG_KILL_ACK:
+        if (body_len != CL_KILL_BODY) return false;
         out->req_id = get32(b);
         return true;
 

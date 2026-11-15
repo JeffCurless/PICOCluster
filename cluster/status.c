@@ -36,10 +36,20 @@
 #define ROWS       (DISP_HEIGHT / ROW_H)
 
 /* Rows: title, network, NODES label | node rows | THIS NODE label,
- * one per worker, footer. */
-#define NODE_ROW0  3u
-#define TAIL_ROWS  (2u + (unsigned)CL_MAX_WORKERS)
-#define NODE_ROWS  (ROWS - NODE_ROW0 - TAIL_ROWS)
+ * worker rows, footer.  Workers are drawn in two columns: 0..3 on the left,
+ * 4..7 on the right.  Each cell is CELL_W characters wide, which is
+ * one character narrower than half of the 30-column Display Pack:
+ *   "0 pi     3 12s"  = worker, task, origin node, time running */
+#define NODE_ROW0      3u
+#define WORKER_ROWS    (((unsigned)CL_MAX_WORKERS + 1u) / 2u)
+#define COL_W          (COLS / 2u)
+#define CELL_W         14u
+#define TAIL_ROWS      (2u + WORKER_ROWS)
+#define NODE_ROWS      (ROWS - NODE_ROW0 - TAIL_ROWS)
+
+/* slots() draws 9 px per box from column 21: 8 boxes reach 240 px. */
+#define MAX_BOXES      8u
+_Static_assert(CL_MAX_WORKERS <= MAX_BOXES, "status page draws 8 slot boxes");
 
 #define C_BG       COLOR_BLACK
 #define C_TEXT     COLOR_WHITE
@@ -181,10 +191,20 @@ static void slots(unsigned col, unsigned row, const snap_node_t *n)
 {
     unsigned x = col * CHAR_W;
     unsigned y = row * ROW_H;
-    for (unsigned i = 0; i < n->max && i < 8u; i++) {
+    for (unsigned i = 0; i < n->max && i < MAX_BOXES; i++) {
         bool busy = i < n->busy;
         rect(x + i * 9u, y, 7u, 7u, busy ? C_BUSY : C_FREE, busy);
     }
+}
+
+/* Elapsed time in three characters: "12s", "45m", " 3h", " 9d". */
+static void fmt_age(char out[4], uint32_t secs)
+{
+    if (secs < 100u)              snprintf(out, 4, "%2lus", (unsigned long)secs);
+    else if (secs < 100u * 60u)   snprintf(out, 4, "%2lum", (unsigned long)(secs / 60u));
+    else if (secs < 100u * 3600u) snprintf(out, 4, "%2luh", (unsigned long)(secs / 3600u));
+    else                          snprintf(out, 4, "%2lud",
+                                           (unsigned long)(secs / 86400u % 100u));
 }
 
 static void led(uint32_t rgb)
@@ -266,18 +286,24 @@ static void draw(const snap_t *s)
     unsigned row = ROWS - TAIL_ROWS;
     text(0u, row++, "THIS NODE", C_LABEL, C_BG);
     bool busy = false;
-    for (int i = 0; i < CL_MAX_WORKERS; i++, row++) {
+    for (int i = 0; i < CL_MAX_WORKERS; i++) {
         const snap_job_t *j = &s->jobs[i];
+        unsigned col = (i < (int)WORKER_ROWS) ? 0u : COL_W;
+        unsigned r   = row + (unsigned)i % WORKER_ROWS;
         if (j->state == CL_JOB_FREE) {
-            snprintf(line, sizeof(line), " w%d idle", i);
-            text(0u, row, line, C_DIM, C_BG);
+            snprintf(line, sizeof(line), "%d idle", i);
+            text(col, r, line, C_DIM, C_BG);
             continue;
         }
         busy = true;
-        snprintf(line, sizeof(line), " w%d %-8.8s from %-3u %4lus", i, j->task,
-                 (unsigned)j->origin, (unsigned long)j->secs);
-        text(0u, row, line, j->state == CL_JOB_RUNNING ? C_BUSY : C_TEXT, C_BG);
+        char age[4];
+        fmt_age(age, j->secs);
+        snprintf(line, sizeof(line), "%d %-5.5s %2u %s", i, j->task,
+                 (unsigned)j->origin, age);
+        line[CELL_W] = '\0';             /* never spill into the next column */
+        text(col, r, line, j->state == CL_JOB_RUNNING ? C_BUSY : C_TEXT, C_BG);
     }
+    row += WORKER_ROWS;
 
     /* Footer */
     snprintf(line, sizeof(line), "out %d  ran %lu  got %lu", s->pending,

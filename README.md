@@ -33,8 +33,8 @@ See `cluster/cluster.h` for the API and `apps/cpi.c` for a complete example.
 
 ```bash
 git submodule update --init
-./build            # Pico W + Display Pack and Display Pack 2 -> kits/
-./build D          # Display Pack only   (./build D2 for Display Pack 2)
+./build            # Pico W + Display Pack -> kits/
+./build D          # same, by variant name
 ./build tests      # host unit tests
 ./clean            # empty builds/, remove tests/build and kits/*.uf2
 ```
@@ -68,6 +68,7 @@ cluster nodes        every node heard from, with free worker slots
 cluster jobs         requests from this node, and tasks running on it
 cluster run echo hi  run a task anywhere and print its result
 cluster run echo hi 1    ...on node 1
+cluster kill <req>   stop a request from this node (ids from 'cluster jobs')
 run cpi 12           distributed Monte Carlo pi with 12 threads
 ```
 
@@ -83,7 +84,9 @@ While clusterd runs, the panel shows:
   Orange filled boxes are busy, green outlines are free. This node is marked
   `*`. A node running different firmware shows `build?`.
 - **THIS NODE:** each local worker, with its task, the node that created it,
-  and how long it has been running.
+  and how long it has been running. Workers 0-3 are in the left column
+  and 4-7 in the right, e.g. `0 pi     3 12s` (worker 0, task `pi`, from node
+  3, running 12 s). Times over 99 s show as minutes, hours or days.
 - **Footer:** requests outstanding, tasks run here, and results received.
 
 The Display Pack LED shows the same state: yellow while starting, green when
@@ -101,8 +104,14 @@ idle, blue while running tasks, red on error.
 - **Requests.** These are unicast UDP on port 4300:
   `SPAWN` → `SPAWN_ACK`, then `RESULT` → `RESULT_ACK`. Each is resent every
   200 ms until acknowledged. Workers ignore duplicate SPAWNs.
+- **Kill.** `cluster_thread_kill()` completes the request at once with
+  `CLUSTER_ERR_KILLED`, and the thread must still be joined. A remote worker is
+  sent `KILL` → `KILL_ACK`, resent until acknowledged. It kills the task's
+  process and discards the result.
 - **Placement.** `CLUSTER_NODE_ANY` picks the node, this one included, with the
   most free worker slots. Ties rotate between nodes. A task placed on this node
   runs without touching the network.
-- **Limits (Pico W).** 4 workers per node. Arguments and results are up to
-  512 bytes each (`CLUSTER_MAX_PAYLOAD`).
+- **Limits (Pico W).** 8 workers per node (`CL_MAX_WORKERS`), and up to 32
+  created-but-unjoined threads per node (`CLUSTER_MAX_PENDING`). Arguments and
+  results are up to 512 bytes each (`CLUSTER_MAX_PAYLOAD`). Requires picoOS
+  0.4.2 or later (16 processes, 32 threads).

@@ -11,6 +11,11 @@
 
 #include <string.h>
 
+/* kernel, shell, clusterd and the main app need a process each. */
+_Static_assert(CL_MAX_WORKERS + 4 <= MAX_PROCESSES,
+               "CL_MAX_WORKERS leaves no process for the main app");
+_Static_assert(CL_MAX_WORKERS <= 255, "HELLO carries slot counts in a byte");
+
 static cl_job_t g_jobs[CL_MAX_WORKERS];
 
 const cluster_task_t *cl_task_find(const char *name)
@@ -66,7 +71,9 @@ void cl_exec_free(cl_job_t *j)
  * Trampoline — entry point of every worker process.
  *
  * cl_exec_start() holds cl_lock while it creates this thread, so the
- * cl_lock() below cannot complete before the job's pid is recorded.
+ * cl_lock() below cannot complete before the job's pid is recorded.  If the
+ * job was killed meanwhile (state KILLING) the result is dropped; the slot
+ * is not reused until this process is gone, so `j` stays valid here.
  * Returning from here lets picoOS reap the thread and the process.
  * ------------------------------------------------------------------------- */
 static void cl_trampoline(void *a)
@@ -79,10 +86,12 @@ static void cl_trampoline(void *a)
         ret_len = CLUSTER_MAX_PAYLOAD;
     }
     cl_lock();
-    j->ret_len = ret_len;
-    j->status  = status;
-    j->err     = CLUSTER_OK;
-    j->state   = CL_JOB_DONE;
+    if (j->state == CL_JOB_RUNNING) {
+        j->ret_len = ret_len;
+        j->status  = status;
+        j->err     = CLUSTER_OK;
+        j->state   = CL_JOB_DONE;
+    }
     cl_unlock();
 }
 
@@ -137,11 +146,44 @@ int cl_exec_start(uint32_t req_id, uint16_t origin, const cluster_task_t *task,
     return CLUSTER_OK;
 }
 
+bool cl_exec_kill(uint32_t req_id)
+{
+    cl_job_t *j = cl_exec_find(req_id);
+    if (j == NULL) {
+        return false;
+    }
+    switch (j->state) {
+    case CL_JOB_RUNNING: {
+        pcb_t *proc = task_find_process(j->pid);
+        if (proc != NULL) {
+            task_kill_process(proc);      /* never our own process */
+        }
+        j->state = CL_JOB_KILLING;
+        break;
+    }
+    case CL_JOB_DONE:
+    case CL_JOB_SENDING:
+        cl_exec_free(j);                  /* finished: just drop the result */
+        break;
+    default:
+        break;                            /* already KILLING */
+    }
+    return true;
+}
+
 void cl_exec_reap(void)
 {
     for (int i = 0; i < CL_MAX_WORKERS; i++) {
         cl_job_t *j = &g_jobs[i];
-        if (j->state == CL_JOB_RUNNING && task_find_process(j->pid) == NULL) {
+        if (j->state != CL_JOB_RUNNING && j->state != CL_JOB_KILLING) {
+            continue;
+        }
+        if (task_find_process(j->pid) != NULL) {
+            continue;
+        }
+        if (j->state == CL_JOB_KILLING) {
+            cl_exec_free(j);
+        } else {                          /* killed from the shell */
             j->ret_len = 0u;
             j->status  = 0;
             j->err     = CLUSTER_ERR_KILLED;

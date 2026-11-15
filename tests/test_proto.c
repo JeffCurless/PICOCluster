@@ -81,6 +81,22 @@ static void test_ack_result(void)
     END_TEST();
 }
 
+static void test_kill(void)
+{
+    BEGIN_TEST(kill_and_kill_ack);
+    cl_msg_t m;
+    size_t n = cl_encode_kill(buf, sizeof(buf), 1u, 3u, CL_MSG_KILL, 0x00030009u);
+    CHECK(n == CL_HDR_LEN + CL_KILL_BODY, "kill length");
+    CHECK(cl_decode(buf, n, &m) && m.type == CL_MSG_KILL, "kill decode");
+    CHECK(m.req_id == 0x00030009u && m.src_node == 3u, "kill fields");
+    n = cl_encode_kill(buf, sizeof(buf), 1u, 3u, CL_MSG_KILL_ACK, 7u);
+    CHECK(cl_decode(buf, n, &m) && m.type == CL_MSG_KILL_ACK, "kill ack decode");
+    CHECK(m.req_id == 7u, "kill ack req id");
+    CHECK(cl_encode_kill(buf, sizeof(buf), 1u, 3u, CL_MSG_SPAWN, 7u) == 0u,
+          "other types rejected");
+    END_TEST();
+}
+
 static void test_reject(void)
 {
     BEGIN_TEST(decode_rejects_bad_packets);
@@ -142,6 +158,7 @@ int main(void)
     test_spawn();
     test_spawn_limits();
     test_ack_result();
+    test_kill();
     test_reject();
     test_recent();
     test_fnv();

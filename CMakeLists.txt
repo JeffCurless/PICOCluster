@@ -3,14 +3,15 @@ cmake_minimum_required(VERSION 3.18)   # 3.18: set_source_files_properties(TARGE
 # ===========================================================================
 # picoCluster — cluster environment built on picoOS (git submodule).
 #
-# Supported target (for now): Raspberry Pi Pico W with a Pimoroni Display Pack.
+# Supported target (for now): Raspberry Pi Pico W with a Pimoroni Display Pack
+# (240x135).  Display Pack 2 is not supported: on the RP2040 its 75 KB
+# framebuffer leaves the WiFi stack too little SRAM.  Revisit with Pico 2 W.
 #
 #   ./build            configure + build every variant into builds/
 #   ./clean            empty builds/ and remove the images in kits/
 #
 # Or by hand:
 #   cmake -B builds/picow_D  -DPICO_BOARD=picow
-#   cmake -B builds/picow_D2 -DPICO_BOARD=picow -DPICOOS_DISPLAY_PACK2=ON
 #   make -j$(nproc) -C builds/picow_D
 #
 # The .uf2 is built in builds/<variant>/picoOS/src/ and copied to kits/.
@@ -63,7 +64,7 @@ pico_sdk_init()
 # ---------------------------------------------------------------------------
 set(CLUSTER_VER_MAJOR 0)
 set(CLUSTER_VER_MINOR 0)
-set(CLUSTER_VER_EDIT  1)
+set(CLUSTER_VER_EDIT  2)
 set(PICOCLUSTER_VERSION "${CLUSTER_VER_MAJOR}.${CLUSTER_VER_MINOR}.${CLUSTER_VER_EDIT}")
 message(STATUS "picoCluster version   : ${PICOCLUSTER_VERSION}")
 
@@ -78,11 +79,15 @@ set(CLUSTER_MAX_PAYLOAD 512)
 # option() declarations (policy CMP0077) and over any -D cache value,
 # so the display cannot be turned off by accident.
 #
-# The Display Pack model is still selectable:
-#   -DPICOOS_DISPLAY_PACK2=ON   Display Pack 2 (320x240)
-#   (default)                   Display Pack   (240x135)
+# Only the Display Pack (240x135) is supported; see the note at the top.
 # ---------------------------------------------------------------------------
+if(PICOOS_DISPLAY_PACK2)
+    message(FATAL_ERROR
+        "picoCluster: Display Pack 2 is not supported on Pico W "
+        "(not enough SRAM with WiFi). Remove -DPICOOS_DISPLAY_PACK2=ON.")
+endif()
 set(PICOOS_DISPLAY_ENABLE ON)
+set(PICOOS_DISPLAY_PACK2  OFF)
 
 # picoOS demo apps (producer/consumer/sensor/pi/scantest/cray-one) are
 # excluded; picoCluster supplies its own app table.
@@ -131,17 +136,11 @@ set_source_files_properties(${PICOOS_APP_SOURCES}
 # Output naming — replaces picoOS's own name (e.g. picowos_D-v0.4.1).
 #
 #   Display Pack   → picocluster_D-v<ver>
-#   Display Pack 2 → picocluster_D2-v<ver>
 #
 # Note: when Pico 2 W support is added the name will need a board tag so the
 # two boards' images can coexist in kits/.
 # ---------------------------------------------------------------------------
-if(PICOOS_DISPLAY_PACK2)
-    set(_disp_suffix "_D2")
-else()
-    set(_disp_suffix "_D")
-endif()
-set(PICOCLUSTER_OUTPUT_NAME "picocluster${_disp_suffix}-v${PICOCLUSTER_VERSION}")
+set(PICOCLUSTER_OUTPUT_NAME "picocluster_D-v${PICOCLUSTER_VERSION}")
 set_target_properties(picoos PROPERTIES OUTPUT_NAME "${PICOCLUSTER_OUTPUT_NAME}")
 message(STATUS "picoCluster output    : ${PICOCLUSTER_OUTPUT_NAME}")
 

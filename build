@@ -6,7 +6,9 @@
 #   ./build           build every variant          (same as "all")
 #   ./build all       build every variant
 #   ./build D         Pico W + Display Pack        (240x135)
-#   ./build D2        Pico W + Display Pack 2      (320x240)
+#
+# Display Pack 2 is not built for now (RP2040 SRAM is too tight with WiFi;
+# revisit with Pico 2 W).
 #   ./build tests     build and run the host-native unit tests (tests/build)
 #
 # Build tree:   builds/<board>_<display>/   e.g. builds/picow_D
@@ -33,11 +35,10 @@ case "${1:-all}" in
         run_tests
         exit $?
         ;;
-    all) VARIANTS="D D2" ;;
+    all) VARIANTS="D" ;;
     D)   VARIANTS="D" ;;
-    D2)  VARIANTS="D2" ;;
     *)
-        echo "Usage: $0 [all|D|D2|tests]" >&2
+        echo "Usage: $0 [all|D|tests]" >&2
         exit 1
         ;;
 esac
@@ -55,12 +56,9 @@ fail() {
 
 build_variant() {
     local disp="$1"
-    local flags=""
-    [ "$disp" = "D2" ] && flags="-DPICOOS_DISPLAY_PACK2=ON"
-
     local dir="builds/${BOARD}_${disp}"
     echo "--- ${BOARD} / ${disp} ---"
-    cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$BOARD" $flags || return 1
+    cmake -B "$dir" -DPICO_SDK_PATH="$SDK" -DPICO_BOARD="$BOARD"        || return 1
     make -j"$JOBS" -C "$dir"                                              || return 1
 }
 

@@ -9,12 +9,14 @@
 #include "kernel/syscall.h"
 #include "shell/shell.h"
 
+#include "pico/time.h"
+
 #include <stdlib.h>
 #include <string.h>
 
 #define CPI_DEFAULT_THREADS   6
 #define CPI_MAX_THREADS      64
-#define CPI_MAX_INFLIGHT     16           /* = CL_MAX_PENDING */
+#define CPI_MAX_INFLIGHT     CLUSTER_MAX_PENDING
 #define CPI_JOIN_TIMEOUT_MS  60000u
 #define CPI_BUSY_RETRIES     100          /* x 100 ms */
 
@@ -74,6 +76,7 @@ void cpi_entry(void *arg)
         shell_println("cpi: clusterd is not running");
         return;
     }
+    uint64_t t0 = time_us_64();
     shell_print("cpi: %d threads x %u samples across %d node(s)\r\n",
                 threads, (unsigned)CPI_SAMPLES, cluster_node_count());
 
@@ -136,8 +139,11 @@ void cpi_entry(void *arg)
         count--;
     }
 
+    uint32_t ms = (uint32_t)((time_us_64() - t0) / 1000u);
+
     if (samples == 0u) {
-        shell_println("cpi: no results");
+        shell_print("cpi: no results  (%d failed, %lu.%03lu s)\r\n", failed,
+                    (unsigned long)(ms / 1000u), (unsigned long)(ms % 1000u));
         return;
     }
     /* pi ~= 4 * hits / samples, printed with 6 decimals. */
@@ -145,6 +151,9 @@ void cpi_entry(void *arg)
     shell_print("cpi: pi ~= %lu.%06lu  (%d ok, %d failed)\r\n",
                 (unsigned long)(pi_e6 / 1000000u),
                 (unsigned long)(pi_e6 % 1000000u), finished, failed);
+    shell_print("cpi: %lu samples in %lu.%03lu s\r\n",
+                (unsigned long)samples,
+                (unsigned long)(ms / 1000u), (unsigned long)(ms % 1000u));
     shell_print("cpi: threads per node:");
     for (int i = 0; i < 8; i++) {
         if (per_node[i] > 0) shell_print(" %d:%d", i, per_node[i]);

@@ -18,9 +18,11 @@
 #include <stdint.h>
 
 #include "kernel/sync.h"
+#include "cluster/cluster.h"
 #include "cluster/proto.h"
 
-#define CL_MAX_PENDING 16
+#define CL_MAX_PENDING CLUSTER_MAX_PENDING
+#define CL_MAX_KILLS    8     /* KILLs awaiting KILL_ACK */
 
 typedef enum {
     CL_P_FREE = 0,
@@ -54,9 +56,13 @@ void cl_rpc_deliver(uint32_t req_id, int32_t status, int32_t err,
                     const void *ret, size_t ret_len);
 
 void cl_rpc_on_spawn_ack(uint32_t req_id, uint8_t code);
+void cl_rpc_on_kill_ack(uint32_t req_id);
+
+/* cluster_thread_kill() by request id (for the shell).  Takes cl_lock. */
+int  cl_rpc_kill_req(uint32_t req_id);
 void cl_rpc_node_lost(uint16_t node);
 
-/* Retransmit unacknowledged SPAWNs and expire join deadlines. */
+/* Retransmit unacknowledged SPAWNs and KILLs; expire join deadlines. */
 void cl_rpc_tick(uint64_t now);
 
 #endif /* CLUSTER_RPC_H */

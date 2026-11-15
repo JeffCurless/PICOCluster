@@ -2,7 +2,8 @@
  * clusterd.c — the cluster daemon and the 'cluster' shell command.
  *
  * clusterd joins WiFi, opens the cluster sockets, then loops forever:
- *   - drain received packets (HELLO, SPAWN, SPAWN_ACK, RESULT, RESULT_ACK)
+ *   - drain received packets (HELLO, SPAWN, SPAWN_ACK, RESULT, RESULT_ACK,
+ *     KILL, KILL_ACK)
  *   - deliver finished local jobs, retransmit unacknowledged RESULTs
  *   - retransmit unacknowledged SPAWNs, expire join deadlines
  *   - forget silent nodes (their requests fail with NODE_LOST)
@@ -136,6 +137,21 @@ static void on_result_ack(const cl_msg_t *m)
     }
 }
 
+static void on_kill(const cl_msg_t *m)
+{
+    cl_job_t *j = cl_exec_find(m->req_id);
+    if (j == NULL || j->origin == m->src_node) {
+        (void)cl_exec_kill(m->req_id);
+        /* Also stops a SPAWN still in flight from starting the task. */
+        if (!cl_recent_has(&g_recent, m->req_id)) {
+            cl_recent_add(&g_recent, m->req_id);
+        }
+    }
+    send_to_node(m->src_node,
+                 cl_encode_kill(cl_tx_buf, sizeof(cl_tx_buf), cl_build_id,
+                                cl_self_id, CL_MSG_KILL_ACK, m->req_id));
+}
+
 static void handle_packet(const cl_rx_pkt_t *pkt, uint64_t now)
 {
     cl_msg_t m;
@@ -163,6 +179,8 @@ static void handle_packet(const cl_rx_pkt_t *pkt, uint64_t now)
     case CL_MSG_SPAWN_ACK:  cl_rpc_on_spawn_ack(m.req_id, m.code);     break;
     case CL_MSG_RESULT:     on_result(&m);                             break;
     case CL_MSG_RESULT_ACK: on_result_ack(&m);                         break;
+    case CL_MSG_KILL:       on_kill(&m);                               break;
+    case CL_MSG_KILL_ACK:   cl_rpc_on_kill_ack(m.req_id);              break;
     default:                                                           break;
     }
 }
@@ -271,7 +289,8 @@ static void cmd_nodes(void)
 static void cmd_jobs(void)
 {
     static const char *const pstate[] = { "free", "sent", "running", "done" };
-    static const char *const jstate[] = { "free", "running", "done", "sending" };
+    static const char *const jstate[] = { "free", "running", "done", "sending",
+                                          "killing" };
     cl_lock();
     shell_println("Requests from this node:");
     for (int i = 0; i < CL_MAX_PENDING; i++) {
@@ -332,6 +351,24 @@ static int cmd_run(int argc, char **argv)
     return 0;
 }
 
+static int cmd_kill(int argc, char **argv)
+{
+    if (argc < 3) {
+        shell_println("Usage: cluster kill <req>   (req id from 'cluster jobs')");
+        return -1;
+    }
+    uint32_t req = (uint32_t)strtoul(argv[2], NULL, 16);
+    int rc = cl_rpc_kill_req(req);
+    if (rc != CLUSTER_OK) {
+        shell_print("cluster kill: %s\r\n",
+                    rc == CLUSTER_ERR_ARG ? "no such request on this node"
+                                          : cluster_strerror(rc));
+        return -1;
+    }
+    shell_print("cluster kill: %08lx killed\r\n", (unsigned long)req);
+    return 0;
+}
+
 static int cmd_cluster(int argc, char **argv)
 {
     if (argc < 2 || strcmp(argv[1], "status") == 0) {
@@ -345,13 +382,14 @@ static int cmd_cluster(int argc, char **argv)
     if (strcmp(argv[1], "nodes") == 0) { cmd_nodes(); return 0; }
     if (strcmp(argv[1], "jobs")  == 0) { cmd_jobs();  return 0; }
     if (strcmp(argv[1], "run")   == 0) { return cmd_run(argc, argv); }
-    shell_println("Usage: cluster [status|nodes|jobs|run <task> [arg] [node]]");
+    if (strcmp(argv[1], "kill")  == 0) { return cmd_kill(argc, argv); }
+    shell_println("Usage: cluster [status|nodes|jobs|run <task> [arg] [node]|kill <req>]");
     return -1;
 }
 
 static const shell_cmd_t g_cluster_cmd = {
     "cluster",
-    "cluster [status|nodes|jobs|run <task> [arg] [node]]",
+    "cluster [status|nodes|jobs|run <task> [arg] [node]|kill <req>]",
     cmd_cluster,
 };
 

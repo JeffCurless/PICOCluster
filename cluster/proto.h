@@ -12,6 +12,8 @@
  *   SPAWN_ACK   req_id(4) code(1) rsvd(3)                           unicast
  *   RESULT      req_id(4) status(4) err(4) ret[...]                 unicast
  *   RESULT_ACK  req_id(4)                                           unicast
+ *   KILL        req_id(4)                                           unicast
+ *   KILL_ACK    req_id(4)                                           unicast
  *
  * This file has no picoOS dependencies so it can be unit-tested on the host.
  */
@@ -30,7 +32,7 @@
 #endif
 
 #define CL_MAGIC          0x53554C43u      /* "CLUS" as little-endian bytes */
-#define CL_PROTO_VER      1u
+#define CL_PROTO_VER      2u               /* 2: KILL / KILL_ACK */
 #define CL_TASK_NAME_MAX  16u              /* including the NUL            */
 
 #define CL_HDR_LEN        16u
@@ -39,6 +41,7 @@
 #define CL_ACK_BODY       8u
 #define CL_RESULT_FIXED   12u
 #define CL_RACK_BODY      4u
+#define CL_KILL_BODY      4u
 
 /* Largest packet on the wire (a SPAWN with a full argument). */
 #define CL_MAX_PKT        (CL_HDR_LEN + CL_SPAWN_FIXED + CLUSTER_MAX_PAYLOAD)
@@ -49,6 +52,8 @@ typedef enum {
     CL_MSG_SPAWN_ACK  = 3,
     CL_MSG_RESULT     = 4,
     CL_MSG_RESULT_ACK = 5,
+    CL_MSG_KILL       = 6,
+    CL_MSG_KILL_ACK   = 7,
 } cl_msg_type_t;
 
 typedef enum {
@@ -89,6 +94,9 @@ size_t cl_encode_result(uint8_t *buf, size_t cap, uint32_t build_id,
                         int32_t err, const void *ret, size_t ret_len);
 size_t cl_encode_result_ack(uint8_t *buf, size_t cap, uint32_t build_id,
                             uint16_t node, uint32_t req_id);
+/* type is CL_MSG_KILL or CL_MSG_KILL_ACK. */
+size_t cl_encode_kill(uint8_t *buf, size_t cap, uint32_t build_id,
+                      uint16_t node, cl_msg_type_t type, uint32_t req_id);
 
 /* Validate and decode a packet.  False on a short packet, wrong magic or
  * protocol version, unknown type, or a body length that does not match. */
