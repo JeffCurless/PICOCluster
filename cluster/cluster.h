@@ -9,8 +9,9 @@
  *   ...
  *   rc = cluster_thread_join(&t, &hits, sizeof(hits), &len, &status, 60000u);
  *
- * Requires the cluster daemon (clusterd) to be running — normally started at
- * boot with AUTORUN=clusterd in config.txt.
+ * Requires the cluster daemon (clusterd) to be running: started at boot with
+ * AUTORUN=clusterd in config.txt, or by an app calling cluster_start() (so
+ * AUTORUN=<that app> works on its own).
  *
  * Every created thread must be joined exactly once; joining frees its slot.
  * cluster_thread_kill() stops a thread early; it must still be joined.
@@ -19,6 +20,7 @@
 #ifndef CLUSTER_H
 #define CLUSTER_H
 
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -45,13 +47,19 @@
 
 typedef struct {
     uint32_t req_id;    /* cluster-wide request id      */
-    int      node;      /* node the task was placed on  */
+    int      node;      /* node the task runs on; join updates it if the
+                         * request was re-placed (see below)            */
 } cluster_thread_t;
 
 /*
  * Start `task` with a copy of arg[0..arg_len) on `node`, or on the node with
  * the most free worker slots when node == CLUSTER_NODE_ANY (this node
  * included).  Returns CLUSTER_OK and fills *t, or a CLUSTER_ERR_* code.
+ *
+ * With CLUSTER_NODE_ANY, if the chosen node turns out to be busy when the
+ * request reaches it, the request is placed again elsewhere instead of
+ * failing; t->node is then updated by join.  A request for a specific node
+ * that is busy there completes with CLUSTER_ERR_BUSY.
  */
 int cluster_thread_create(cluster_thread_t *t, const char *task,
                           const void *arg, size_t arg_len, int node);
@@ -74,6 +82,16 @@ int cluster_thread_join(cluster_thread_t *t, void *ret, size_t ret_max,
  * CLUSTER_ERR_NOTRUNNING.
  */
 int cluster_thread_kill(cluster_thread_t *t);
+
+/*
+ * Start clusterd in its own process if it is not running, then wait up to
+ * timeout_ms for it to come up (join WiFi, open sockets).  *started (may be
+ * NULL) is set true when this call did the start, i.e. the node has only
+ * just booted and peers may not have been heard from yet.  CLUSTER_OK, or
+ * CLUSTER_ERR_NOTRUNNING if it did not come up in time (config.txt or WiFi
+ * problem: the status page shows which).
+ */
+int cluster_start(uint32_t timeout_ms, bool *started);
 
 int         cluster_self(void);          /* this node's NODEID, -1 if not running */
 int         cluster_node_count(void);    /* live compatible nodes, self included  */

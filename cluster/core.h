@@ -21,11 +21,13 @@
 #define CL_LOG(...)  printf("[cluster] " __VA_ARGS__)
 
 /* Timing (microseconds). */
-#define CL_HELLO_INTERVAL_US   1000000u   /* HELLO multicast period          */
+#define CL_HELLO_INTERVAL_US   1000000u   /* HELLO period                    */
+#define CL_HELLO_DEDUP_US       300000u   /* 2nd copy of a HELLO is ignored  */
 #define CL_NODE_TIMEOUT_US     5000000u   /* node forgotten after silence    */
 #define CL_RETRY_US             200000u   /* SPAWN / RESULT retransmit       */
 #define CL_SPAWN_TRIES               5u   /* SPAWN sends before NODE_LOST    */
 #define CL_RESULT_TRIES             10u   /* RESULT sends before giving up   */
+#define CL_BUSY_REPLACES            20u   /* re-placements after busy refusal */
 
 extern uint16_t cl_self_id;      /* NODEID from config.txt   */
 extern uint32_t cl_build_id;     /* see clusterd.c           */

@@ -5,7 +5,14 @@
  *   remote  SENT --SPAWN_ACK ok--> RUNNING --RESULT--> DONE --join--> FREE
  *   local   RUNNING (job in exec.c) --------------->   DONE --join--> FREE
  * Any error (busy, unknown task, node lost, timeout, killed) also ends in
- * DONE with `err` set.  join() blocks on the `done` semaphore, which is
+ * DONE with `err` set.
+ *
+ * A request placed with CLUSTER_NODE_ANY that a remote node refuses as busy
+ * is not failed: it goes back to SENT with `unplaced` set, and the next tick
+ * places it again (on another node, or the same one after its next HELLO),
+ * up to CL_BUSY_REPLACES times.  The node estimate it was placed on comes
+ * from a HELLO that may not count SPAWNs still in flight, so this race is
+ * expected under load.  join() blocks on the `done` semaphore, which is
  * signalled exactly once, when the request reaches DONE.
  *
  * Everything except the public API in cluster.h is called with cl_lock held.
@@ -39,6 +46,9 @@ typedef struct {
     uint8_t     *arg;            /* kept for retransmit until ACK (remote) */
     uint16_t     arg_len;
     uint8_t      tries;
+    uint8_t      any;            /* placed with CLUSTER_NODE_ANY           */
+    uint8_t      unplaced;       /* refused as busy; waiting to re-place   */
+    uint8_t      replaced;       /* times re-placed                        */
     uint64_t     next_tx_us;
     uint64_t     deadline_us;    /* join timeout, 0 = none                 */
     int32_t      status;
@@ -55,7 +65,7 @@ cl_pending_t *cl_rpc_slot(int idx);       /* NULL past the end */
 void cl_rpc_deliver(uint32_t req_id, int32_t status, int32_t err,
                     const void *ret, size_t ret_len);
 
-void cl_rpc_on_spawn_ack(uint32_t req_id, uint8_t code);
+void cl_rpc_on_spawn_ack(uint32_t req_id, uint16_t src_node, uint8_t code);
 void cl_rpc_on_kill_ack(uint32_t req_id);
 
 /* cluster_thread_kill() by request id (for the shell).  Takes cl_lock. */

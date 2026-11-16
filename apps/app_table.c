@@ -12,12 +12,14 @@
 #include "cluster/clusterd.h"
 #include "cpi.h"
 #include "cray_one.h"
+#include "mandel.h"
 
 const app_entry_t app_table[] = {
     /* name       entry           prio  stack (0 = DEFAULT_STACK_SIZE) */
     { "clusterd", clusterd_entry, 3u,   0u },   /* AUTORUN=clusterd in config.txt */
     { "cpi",      cpi_entry,      4u,   0u },   /* run cpi [threads]              */
     { "cray-one", cray_one,       3u,   0u },   /* multicast color grid demo      */
+    { "mandel",   mandel_entry,   4u,   0u },   /* run mandel [max_iter]          */
 };
 
 const int app_table_size = (int)(sizeof(app_table) / sizeof(app_table[0]));

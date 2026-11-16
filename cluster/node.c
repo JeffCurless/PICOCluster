@@ -5,6 +5,7 @@
 #include "cluster/node.h"
 #include "cluster/core.h"
 
+#include "kernel/mem.h"
 #include "kernel/vfs.h"
 #include "kernel/wifi.h"
 
@@ -39,24 +40,81 @@ static bool key_is(const char *line, size_t line_len, const char *key,
     return true;
 }
 
+/* Read config.txt into buf (NUL-terminated).  Bytes read, or <= 0. */
+static int read_config(char *buf, size_t buf_sz)
+{
+    int fd = vfs_open(CL_CONFIG_FILE, VFS_O_RDONLY);
+    if (fd < 0) {
+        return -1;
+    }
+    int n = vfs_read(fd, (uint8_t *)buf, (uint32_t)(buf_sz - 1u));
+    vfs_close(fd);
+    buf[n > 0 ? n : 0] = '\0';
+    return n;
+}
+
+int cl_config_value(const char *key, char *out, size_t out_sz)
+{
+    if (key == NULL || out == NULL || out_sz == 0u) {
+        return -1;
+    }
+    /* Heap, not a static: apps may call this while clusterd is reading
+     * config.txt at boot. */
+    char *buf = (char *)kmalloc(CL_CONFIG_BUFSZ);
+    if (buf == NULL) {
+        return -1;
+    }
+    int found = -1;
+    if (read_config(buf, CL_CONFIG_BUFSZ) > 0) {
+        const char *p = buf;
+        while (*p) {
+            const char *eol = p;
+            while (*eol && *eol != '\n' && *eol != '\r') eol++;
+            const char *v;
+            size_t vlen;
+            if (key_is(p, (size_t)(eol - p), key, &v, &vlen)) {
+                copy_value(out, out_sz, v, vlen);
+                found = (int)strlen(out);
+                break;
+            }
+            p = eol;
+            while (*p == '\n' || *p == '\r') p++;
+        }
+    }
+    kfree(buf);
+    return found;
+}
+
+/* OFF / NO / FALSE / 0 (any case) -> false; anything else -> true. */
+static bool parse_on_off(const char *v, size_t len)
+{
+    static const char *const off[] = { "off", "no", "false", "0" };
+    for (size_t i = 0; i < sizeof(off) / sizeof(off[0]); i++) {
+        size_t n = strlen(off[i]);
+        if (len != n) continue;
+        size_t k = 0;
+        while (k < n && (v[k] | 0x20) == off[i][k]) k++;
+        if (k == n) return false;
+    }
+    return true;
+}
+
 int cl_config_load(cl_config_t *cfg)
 {
     memset(cfg, 0, sizeof(*cfg));
     cfg->nodeid = -1;
+    cfg->status_page = true;
 
-    int fd = vfs_open(CL_CONFIG_FILE, VFS_O_RDONLY);
-    if (fd < 0) {
+    static char buf[CL_CONFIG_BUFSZ];
+    int n = read_config(buf, sizeof(buf));
+    if (n < 0) {
         CL_LOG("cannot open %s\r\n", CL_CONFIG_FILE);
         return -1;
     }
-    static char buf[CL_CONFIG_BUFSZ];
-    int n = vfs_read(fd, (uint8_t *)buf, sizeof(buf) - 1u);
-    vfs_close(fd);
-    if (n <= 0) {
+    if (n == 0) {
         CL_LOG("%s is empty\r\n", CL_CONFIG_FILE);
         return -1;
     }
-    buf[n] = '\0';
 
     const char *p = buf;
     while (*p) {
@@ -76,6 +134,8 @@ int cl_config_load(cl_config_t *cfg)
             copy_value(cfg->ssid, sizeof(cfg->ssid), v, vlen);
         } else if (key_is(p, line_len, "PASSWORD=", &v, &vlen)) {
             copy_value(cfg->password, sizeof(cfg->password), v, vlen);
+        } else if (key_is(p, line_len, "STATUS=", &v, &vlen)) {
+            cfg->status_page = parse_on_off(v, vlen);
         } else if (key_is(p, line_len, "NODEID=", &v, &vlen)) {
             int id = 0;
             size_t i = 0;
@@ -177,11 +237,26 @@ void cl_node_hello(uint16_t id, const char *ip, uint32_t build_id,
     }
     strncpy(n->ip, ip, sizeof(n->ip) - 1u);
     n->ip[sizeof(n->ip) - 1u] = '\0';
-    n->build_id         = build_id;
-    n->free_slots       = free_slots;
-    n->max_slots        = max_slots;
-    n->sent_since_hello = 0u;
-    n->last_seen_us     = now;
+    n->build_id     = build_id;
+    n->max_slots    = max_slots;
+    n->last_seen_us = now;
+    /* Each HELLO arrives twice (unicast and multicast copies, see
+     * send_hello in clusterd.c).  Take the slot counts from the first only:
+     * a second reset of sent_since_hello would forget SPAWNs sent between
+     * the copies. */
+    if (n->last_hello_us == 0u || now - n->last_hello_us >= CL_HELLO_DEDUP_US) {
+        n->free_slots       = free_slots;
+        n->sent_since_hello = 0u;
+        n->last_hello_us    = now;
+    }
+}
+
+void cl_node_touch(uint16_t id, uint64_t now)
+{
+    cl_node_t *n = cl_node_find(id);
+    if (n != NULL) {
+        n->last_seen_us = now;
+    }
 }
 
 int cl_nodes_expire(uint64_t now, uint16_t *lost, int max_lost)

@@ -13,7 +13,12 @@
  *
  * The Display Pack RGB LED mirrors the state: yellow starting, green idle,
  * blue running tasks, red error.  Without a display this is a no-op.
+ *
+ * The panel can be handed to apps: see cluster/display.h (claim/release)
+ * and cl_status_set_enabled() (config.txt STATUS=OFF).
  */
+
+#include <stdbool.h>
 
 #ifndef CLUSTER_STATUS_H
 #define CLUSTER_STATUS_H
@@ -34,5 +39,9 @@ typedef enum {
 void cl_status_start(void);
 
 void cl_status_set_phase(cl_phase_t phase);
+
+/* false: clear the panel once and stop drawing the status page (the LED keeps
+ * working).  Set from config.txt STATUS= by clusterd.  Default true. */
+void cl_status_set_enabled(bool enabled);
 
 #endif /* CLUSTER_STATUS_H */

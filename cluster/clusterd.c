@@ -19,9 +19,11 @@
 #include "cluster/rpc.h"
 #include "cluster/status.h"
 
+#include "apps/app_table.h"   /* app_table[]: clusterd's priority */
 #include "kernel/mem.h"
 #include "kernel/sync.h"
 #include "kernel/syscall.h"
+#include "kernel/task.h"
 #include "kernel/wifi.h"
 #include "shell/shell.h"
 
@@ -39,11 +41,59 @@ uint32_t cl_stat_reqs_done;
 static kmutex_t          g_lock;
 static volatile bool     g_running;
 static bool              g_started;           /* clusterd entered once    */
+static volatile bool     g_spawned;           /* cluster_start spawned it */
 static cl_recent_t       g_recent;            /* finished remote req ids  */
 static cl_rx_pkt_t       g_rx;                /* clusterd's receive copy  */
 static uint64_t          g_next_hello_us;
 
 bool cl_running(void) { return g_running; }
+
+#define CLD_START_POLL_MS  100u
+#define CLD_DEFAULT_PRIO   3u
+
+int cluster_start(uint32_t timeout_ms, bool *started)
+{
+    if (started != NULL) *started = false;
+    if (g_running) {
+        return CLUSTER_OK;
+    }
+    if (!g_started && !g_spawned) {
+        g_spawned = true;               /* one spawn, even if callers race */
+        uint8_t prio = CLD_DEFAULT_PRIO;
+        for (int i = 0; i < app_table_size; i++) {
+            if (strcmp(app_table[i].name, "clusterd") == 0) {
+                prio = app_table[i].priority;
+                break;
+            }
+        }
+        /* Its own process (as AUTORUN= would make it), so it outlives the
+         * app that started it. */
+        pcb_t *proc = task_create_process("clusterd",
+                                          task_alloc_pid(PID_RANGE_AUTORUN));
+        tcb_t *t = NULL;
+        if (proc != NULL) {
+            t = task_create_thread(proc, "clusterd", clusterd_entry, NULL,
+                                   prio, DEFAULT_STACK_SIZE);
+            if (t == NULL) {
+                task_free_process(proc);
+            }
+        }
+        if (t == NULL) {
+            g_spawned = false;
+            CL_LOG("cannot start clusterd (process or thread pool full)\r\n");
+            return CLUSTER_ERR_NOTRUNNING;
+        }
+        CL_LOG("clusterd started by PID %d\r\n", sys_getpid());
+        if (started != NULL) *started = true;
+    }
+    for (uint32_t waited = 0u; !g_running; waited += CLD_START_POLL_MS) {
+        if (timeout_ms != 0u && waited >= timeout_ms) {
+            return CLUSTER_ERR_NOTRUNNING;
+        }
+        sys_sleep(CLD_START_POLL_MS);
+    }
+    return CLUSTER_OK;
+}
 void cl_lock(void)    { kmutex_lock(&g_lock); }
 void cl_unlock(void)  { kmutex_unlock(&g_lock); }
 
@@ -174,9 +224,10 @@ static void handle_packet(const cl_rx_pkt_t *pkt, uint64_t now)
     if (m.build_id != cl_build_id) {
         return;                         /* different firmware — ignore */
     }
+    cl_node_touch(m.src_node, now);
     switch (m.type) {
     case CL_MSG_SPAWN:      on_spawn(&m);                              break;
-    case CL_MSG_SPAWN_ACK:  cl_rpc_on_spawn_ack(m.req_id, m.code);     break;
+    case CL_MSG_SPAWN_ACK:  cl_rpc_on_spawn_ack(m.req_id, m.src_node, m.code);     break;
     case CL_MSG_RESULT:     on_result(&m);                             break;
     case CL_MSG_RESULT_ACK: on_result_ack(&m);                         break;
     case CL_MSG_KILL:       on_kill(&m);                               break;
@@ -221,6 +272,10 @@ static void service_jobs(uint64_t now)
     }
 }
 
+/* HELLO multicasts that failed to send, and the last error (wifi.h). */
+static uint32_t g_hello_fail;
+static int      g_hello_err;
+
 static void send_hello(uint64_t now)
 {
     int free_slots = cl_exec_free_slots();
@@ -228,7 +283,23 @@ static void send_hello(uint64_t now)
                                  cl_self_id, (uint8_t)free_slots,
                                  (uint8_t)CL_MAX_WORKERS);
     if (len > 0u) {
-        (void)cl_net_send_mcast(cl_tx_buf, len);
+        /* Multicast finds new nodes, but WiFi multicast is unacknowledged
+         * and easily lost, so known peers also get a unicast copy (acked
+         * and retried by the radio).  That keeps them from timing out. */
+        int rc = cl_net_send_mcast(cl_tx_buf, len);
+        if (rc != 0) {
+            if (g_hello_fail == 0u) {
+                CL_LOG("HELLO send failed (%d)\r\n", rc);
+            }
+            g_hello_fail++;
+            g_hello_err = rc;
+        }
+        for (int i = 0; i < CL_MAX_NODES; i++) {
+            const cl_node_t *n = cl_node_slot(i);
+            if (n != NULL && n->used) {
+                (void)cl_net_send_to(n->ip, cl_tx_buf, len);
+            }
+        }
     }
     g_next_hello_us = now + CL_HELLO_INTERVAL_US;
 }
@@ -266,6 +337,8 @@ static void cmd_status(void)
                 (unsigned)cl_self_id, wifi_get_ip_str(),
                 cl_exec_free_slots(), CL_MAX_WORKERS, cluster_node_count(),
                 (unsigned long)cl_net_drops());
+    shell_print("hello send failures %lu (last error %d)\r\n",
+                (unsigned long)g_hello_fail, g_hello_err);
 }
 
 static void cmd_nodes(void)
@@ -418,6 +491,7 @@ void clusterd_entry(void *arg)
         return;
     }
     cl_self_id = (uint16_t)cfg.nodeid;
+    cl_status_set_enabled(cfg.status_page);
 
     cl_status_set_phase(CL_PHASE_WIFI);
     if (cl_wifi_up(&cfg) != 0) {

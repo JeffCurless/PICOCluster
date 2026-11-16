@@ -7,6 +7,11 @@
  * unicast UDP with payloads larger than WIFI_MCAST_MAX_PAYLOAD.  Every lwIP
  * call is made inside cyw43_arch_lwip_begin/end, as kernel/wifi.c does.
  *
+ * WiFi power save is turned off when the sockets open (cl_net_open).  With
+ * the SDK default (CYW43_PERFORMANCE_PM) the radio sleeps between beacons
+ * and multicast is only delivered at DTIM beacons, where it is easily lost;
+ * nodes then miss each other's HELLOs and drop out of the node table.
+ *
  * Receive ring: single producer (the CYW43 async context, which runs both
  * receive callbacks), single consumer (clusterd).  head is written only by
  * the producer, tail only by the consumer; memory barriers order the slot
@@ -26,7 +31,10 @@
 
 #include <string.h>
 
-#define CL_RX_SLOTS 6u
+/* 16 slots (~9 KB) absorb a burst of SPAWNs or RESULTs between clusterd's
+ * 5 ms polls; with 6, mandel's bursts overflowed it and every dropped
+ * packet cost a 200 ms retransmit. */
+#define CL_RX_SLOTS 16u
 
 static cl_rx_pkt_t       g_ring[CL_RX_SLOTS];
 static volatile uint32_t g_head;          /* next slot to fill  (producer) */
@@ -152,7 +160,11 @@ int cl_net_open(void)
     }
     udp_recv(pcb, ucast_recv, NULL);
     g_pcb = pcb;
+    int pm_rc = cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
     cyw43_arch_lwip_end();
+    if (pm_rc != 0) {
+        CL_LOG("could not turn off WiFi power save (%d)\r\n", pm_rc);
+    }
 
     g_mcast = wifi_mcast_open(CL_MCAST_GROUP, CL_MCAST_PORT, mcast_recv, NULL);
     if (g_mcast < 0) {

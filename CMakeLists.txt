@@ -64,7 +64,7 @@ pico_sdk_init()
 # ---------------------------------------------------------------------------
 set(CLUSTER_VER_MAJOR 0)
 set(CLUSTER_VER_MINOR 0)
-set(CLUSTER_VER_EDIT  5)
+set(CLUSTER_VER_EDIT  6)
 set(PICOCLUSTER_VERSION "${CLUSTER_VER_MAJOR}.${CLUSTER_VER_MINOR}.${CLUSTER_VER_EDIT}")
 message(STATUS "picoCluster version   : ${PICOCLUSTER_VERSION}")
 
@@ -115,6 +115,7 @@ set(PICOOS_APP_SOURCES
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/cluster_tasks.c
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/cpi.c
     ${CMAKE_CURRENT_SOURCE_DIR}/apps/cray_one.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/apps/mandel.c
 )
 # The project root makes "cluster/..." includes resolve; apps/ for app headers.
 set(PICOOS_APP_INCLUDE_DIRS

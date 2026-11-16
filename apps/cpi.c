@@ -19,6 +19,8 @@
 #define CPI_MAX_INFLIGHT     CLUSTER_MAX_PENDING
 #define CPI_JOIN_TIMEOUT_MS  60000u
 #define CPI_BUSY_RETRIES     100          /* x 100 ms */
+#define CPI_START_MS         30000u       /* wait for clusterd to come up */
+#define CPI_SETTLE_MS        3000u        /* then 3 HELLOs to find peers  */
 
 /* -------------------------------------------------------------------------
  * Worker — runs on whichever node the cluster picks.
@@ -72,9 +74,13 @@ void cpi_entry(void *arg)
     if (threads < 1) threads = 1;
     if (threads > CPI_MAX_THREADS) threads = CPI_MAX_THREADS;
 
-    if (cluster_self() < 0) {
-        shell_println("cpi: clusterd is not running");
+    bool started = false;
+    if (cluster_start(CPI_START_MS, &started) != CLUSTER_OK) {
+        shell_println("cpi: clusterd did not start (see the status page / config.txt)");
         return;
+    }
+    if (started) {
+        sys_sleep(CPI_SETTLE_MS);        /* let peers booting with us be heard */
     }
     uint64_t t0 = time_us_64();
     shell_print("cpi: %d threads x %u samples across %d node(s)\r\n",

@@ -15,6 +15,7 @@
 #if defined(PICOOS_WIFI_ENABLE) && defined(PICOOS_DISPLAY_ENABLE)
 
 #include "cray_one.h"           /* picoCluster copy (apps/) */
+#include "cluster/display.h"    /* share the panel with the status page */
 #include "kernel/wifi.h"
 #include "kernel/vfs.h"
 #include "kernel/syscall.h"
@@ -536,9 +537,8 @@ static void cray_disp_thread(void *arg)
  *    display poll); waits for both to finish via event flags
  * 7. Cleans up socket / display / LED
  * ------------------------------------------------------------------------- */
-void cray_one(void *arg)
+static void cray_one_run(void)
 {
-    (void)arg;
 
 #ifdef PICOOS_LED_ENABLE
     dev_open(DEV_LED);
@@ -733,6 +733,18 @@ void cray_one(void *arg)
 #endif
 
     shell_print("[cray-one] stopped\r\n");
+}
+
+/* Entry point: take the panel from the cluster status page for the run. */
+void cray_one(void *arg)
+{
+    (void)arg;
+    if (cl_display_claim() != 0) {
+        shell_print("[cray-one] ERROR: display in use by another app\r\n");
+        return;
+    }
+    cray_one_run();
+    cl_display_release();
 }
 
 #endif /* PICOOS_WIFI_ENABLE && PICOOS_DISPLAY_ENABLE */

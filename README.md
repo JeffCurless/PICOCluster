@@ -71,8 +71,36 @@ PASSWORD=secret
 
 - `NODEID` must be unique in the cluster (0..65534).
 - `SSIDALT=` and `PASSWORDALT=` set an optional fallback network.
-- Keep `AUTORUN=` within the first 256 bytes of the file. picoOS only reads
-  that far.
+- `STATUS=OFF` turns off the status page on the panel, which frees the
+  panel for apps. The LED still shows the cluster state. The default is
+  `STATUS=ON`.
+- `AUTORUN=` can name a cluster app instead of `clusterd`, for example
+  `AUTORUN=mandel`. `mandel` and `cpi` start clusterd themselves if it isn't
+  running (`cluster_start()` in `cluster/cluster.h`), then wait 3 s so that
+  nodes booting at the same time are found.
+- `BUTTONA=`, `BUTTONB=`, `BUTTONX=` and `BUTTONY=` start an app when that
+  Display Pack button is pressed. This is a picoOS feature. For example,
+  `BUTTONX=mandel`.
+- `MANDEL_ITER=` sets mandel's iteration limit when it is started without an
+  argument, which is always the case for `AUTORUN=` and `BUTTONx=` (16..1000,
+  default 255).
+- Keep `AUTORUN=` and `BUTTONx=` within the first 256 bytes of the file.
+  picoOS only reads that far.
+
+A node that runs the Mandelbrot when it boots, and restarts it when X is
+pressed:
+
+```
+AUTORUN=mandel
+BUTTONX=mandel
+NODEID=0
+SSID=mynetwork
+PASSWORD=secret
+MANDEL_ITER=500
+```
+
+The other nodes keep `AUTORUN=clusterd`. Any node with `BUTTONX=mandel` can
+become the one drawing the image when you press X on it.
 
 ## Using it
 
@@ -86,7 +114,47 @@ cluster run echo hi  run a task anywhere and print its result
 cluster run echo hi 1    ...on node 1
 cluster kill <req>   stop a request from this node (ids from 'cluster jobs')
 run cpi 12           distributed Monte Carlo pi with 12 threads
+run mandel           distributed Mandelbrot on this node's panel
+run mandel 500       ...with up to 500 iterations per point (16..1000)
 ```
+
+### Mandelbrot
+
+`run mandel` draws a Mandelbrot set on the panel of the node you start it on.
+`AUTORUN=mandel` and `BUTTONX=mandel` in `config.txt` start it without the
+shell (see [Setting up a node](#setting-up-a-node)). With `BUTTONX=mandel`,
+X still means "next view" while mandel runs. picoOS only prints
+`[shell] btn: 'mandel' already running` on the console.
+The image is upright when the panel is mounted portrait with the USB end at the
+bottom. If your mount is the other way up, flip `MANDEL_USB_BOTTOM` in
+`apps/mandel.c`.
+
+- The image is split into 80 bands of 3 rows each. Each band is a `mandel`
+  cluster task, run on whichever node has a free worker.
+- A coloured stripe on the left edge of each band shows which node computed
+  it.
+- After each frame, the shell shows how long it took and how many bands each
+  node computed.
+
+The Display Pack buttons control it:
+
+| Button | Action |
+|--------|--------|
+| A | zoom in x2 |
+| B | zoom out x2 |
+| X | next preset view: full set, Seahorse Valley, Elephant Valley, a spiral |
+| Y | quit (also stops a frame part way through) |
+
+**Demo mode.** If no button is pressed for a minute, mandel runs by itself.
+Every 15 seconds it zooms in, as if A were pressed. After 8 zooms it moves to
+the next view, as if X were pressed, and then starts zooming again. If a view
+can't zoom any further, it moves on early. Pressing any button pauses the demo
+for another minute, and Y still quits. The shell shows `mandel: demo ...` for
+each automatic step.
+
+While `mandel` runs, it holds the panel and the status page pauses. When it
+exits, the status page comes back. If `mandel` is killed, the status page
+comes back within about a second.
 
 ### Display Pack status page
 
@@ -108,12 +176,22 @@ While clusterd runs, the panel shows:
 The Display Pack LED shows the same state: yellow while starting, green when
 idle, blue while running tasks, red on error.
 
+Apps can use the panel too. An app claims it with `cl_display_claim()` and
+gives it back with `cl_display_release()` (see `cluster/display.h`). While the
+panel is claimed, the status page doesn't draw, and it redraws in full on
+release. The LED keeps working the whole time. With `STATUS=OFF`, the panel is
+cleared once after boot and then left to apps.
+
 ## How it works
 
 - **Discovery.** Each node multicasts a HELLO every second to
   `239.255.0.2:4301`. The HELLO carries its node id, free worker slots and
-  *build id*. A node that has been silent for 5 s is dropped, and requests
-  running on it fail with `CLUSTER_ERR_NODE_LOST`.
+  *build id*. WiFi multicast is unacknowledged and easily lost, so each node
+  also sends the same HELLO by unicast to every node it already knows. Any
+  packet from a node counts as a sign of life. A node that has been silent
+  for 5 s is dropped, and requests running on it fail with
+  `CLUSTER_ERR_NODE_LOST`. clusterd also turns off WiFi power save, which
+  makes multicast more reliable.
 - **Build id.** This is a hash of the picoCluster version, protocol version,
   payload limit and task names. Nodes with a different build id are listed as
   incompatible and never used. Bump `CLUSTER_VER_*` when task behaviour changes.

@@ -8,6 +8,7 @@
 #include "cluster/cluster_task.h"
 
 #include "cpi.h"
+#include "mandel.h"
 
 #include <string.h>
 
@@ -25,6 +26,7 @@ const cluster_task_t cluster_task_table[] = {
     /* name     function     priority  stack (0 = default) */
     { "echo",   task_echo,   4u,       0u },
     { "pi",     cpi_worker,  5u,       0u },
+    { "mandel", mandel_worker, 5u,     0u },
 };
 
 const int cluster_task_count =

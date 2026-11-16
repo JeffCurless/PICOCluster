@@ -8,12 +8,14 @@
 
 #include "cluster/cluster.h"
 #include "cluster/core.h"
+#include "cluster/display.h"
 #include "cluster/exec.h"
 #include "cluster/node.h"
 #include "cluster/rpc.h"
 
 #include "drivers/display.h"
 #include "kernel/dev.h"
+#include "kernel/sync.h"
 #include "kernel/syscall.h"
 #include "kernel/task.h"
 #include "kernel/wifi.h"
@@ -100,6 +102,66 @@ static snap_t              g_snap[2];        /* current, previous */
 void cl_status_set_phase(cl_phase_t phase)
 {
     g_phase = phase;
+}
+
+/* -------------------------------------------------------------------------
+ * Display ownership (cluster/display.h)
+ *
+ * g_disp_mx is held by the status thread for a whole draw + flush, and by
+ * claim/release while they change the owner, so a claim never lands in the
+ * middle of a redraw.  The owner is recorded as (pid, serial) so a killed
+ * owner is noticed even if its PID is handed out again.
+ * ------------------------------------------------------------------------- */
+static kmutex_t          g_disp_mx;
+static volatile bool     g_disp_ready;       /* mutex initialised, thread up  */
+static volatile uint32_t g_owner_pid;        /* 0 = unclaimed                 */
+static volatile uint32_t g_owner_serial;
+static volatile bool     g_force_redraw;     /* full redraw on next period    */
+static volatile bool     g_enabled = true;   /* config.txt STATUS=            */
+
+void cl_status_set_enabled(bool enabled)
+{
+    g_enabled = enabled;
+    g_force_redraw = true;
+}
+
+/* Caller holds g_disp_mx. */
+static bool owner_alive(void)
+{
+    return g_owner_pid != 0u &&
+           task_process_serial(g_owner_pid) == g_owner_serial;
+}
+
+int cl_display_claim(void)
+{
+    if (!g_disp_ready) {
+        return CLUSTER_OK;              /* no status page to share with */
+    }
+    uint32_t pid = (uint32_t)sys_getpid();
+    int rc = CLUSTER_OK;
+    kmutex_lock(&g_disp_mx);
+    if (owner_alive() && g_owner_pid != pid) {
+        rc = CLUSTER_ERR_BUSY;
+    } else {
+        g_owner_serial = task_process_serial(pid);
+        g_owner_pid    = pid;
+    }
+    kmutex_unlock(&g_disp_mx);
+    return rc;
+}
+
+void cl_display_release(void)
+{
+    if (!g_disp_ready) {
+        return;
+    }
+    kmutex_lock(&g_disp_mx);
+    if (g_owner_pid == (uint32_t)sys_getpid()) {
+        g_owner_pid    = 0u;
+        g_owner_serial = 0u;
+        g_force_redraw = true;
+    }
+    kmutex_unlock(&g_disp_mx);
 }
 
 static void take_snapshot(snap_t *s)
@@ -250,7 +312,6 @@ static void draw(const snap_t *s)
     if (s->phase != CL_PHASE_RUNNING) {
         bool error = s->phase != CL_PHASE_STARTING && s->phase != CL_PHASE_WIFI;
         text(0u, 2u, phase_msg(s->phase), error ? C_ERR : C_TEXT, C_BG);
-        led(error ? 0x200000u : 0x201000u);          /* red / yellow */
         return;
     }
 
@@ -285,7 +346,6 @@ static void draw(const snap_t *s)
     /* This node's workers */
     unsigned row = ROWS - TAIL_ROWS;
     text(0u, row++, "THIS NODE", C_LABEL, C_BG);
-    bool busy = false;
     for (int i = 0; i < CL_MAX_WORKERS; i++) {
         const snap_job_t *j = &s->jobs[i];
         unsigned col = (i < (int)WORKER_ROWS) ? 0u : COL_W;
@@ -295,7 +355,6 @@ static void draw(const snap_t *s)
             text(col, r, line, C_DIM, C_BG);
             continue;
         }
-        busy = true;
         char age[4];
         fmt_age(age, j->secs);
         snprintf(line, sizeof(line), "%d %-5.5s %2u %s", i, j->task,
@@ -309,8 +368,29 @@ static void draw(const snap_t *s)
     snprintf(line, sizeof(line), "out %d  ran %lu  got %lu", s->pending,
              (unsigned long)s->tasks_run, (unsigned long)s->reqs_done);
     text(0u, row, line, C_DIM, C_BG);
+}
 
-    led(busy || s->pending > 0 ? 0x000020u : 0x002000u);   /* blue / green */
+/* The LED follows the cluster state whether or not the panel is ours. */
+static void update_led(const snap_t *s)
+{
+    if (s->phase != CL_PHASE_RUNNING) {
+        bool error = s->phase != CL_PHASE_STARTING && s->phase != CL_PHASE_WIFI;
+        led(error ? 0x200000u : 0x201000u);          /* red / yellow */
+        return;
+    }
+    bool busy = s->pending > 0;
+    for (int i = 0; i < CL_MAX_WORKERS; i++) {
+        if (s->jobs[i].state != CL_JOB_FREE) busy = true;
+    }
+    led(busy ? 0x000020u : 0x002000u);               /* blue / green */
+}
+
+static void clear_panel(void)
+{
+    uint8_t bg = C_BG;
+    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_SET_BG, &bg);
+    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_CLEAR, NULL);
+    dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH, NULL);
 }
 
 /* -------------------------------------------------------------------------
@@ -322,11 +402,43 @@ static void status_thread(void *arg)
     dev_open(DEV_DISPLAY);
     int cur = 0;
     bool first = true;
+    bool cleared = false;                /* panel blanked for STATUS=OFF */
     for (;;) {
         take_snapshot(&g_snap[cur]);
-        if (first || memcmp(&g_snap[cur], &g_snap[cur ^ 1], sizeof(snap_t)) != 0) {
+        bool changed = first ||
+            memcmp(&g_snap[cur], &g_snap[cur ^ 1], sizeof(snap_t)) != 0;
+        if (changed) {
+            update_led(&g_snap[cur]);
+        }
+
+        kmutex_lock(&g_disp_mx);
+        if (g_owner_pid != 0u && !owner_alive()) {
+            g_owner_pid    = 0u;         /* owner was killed: take it back */
+            g_owner_serial = 0u;
+            g_force_redraw = true;
+        }
+        bool claimed = g_owner_pid != 0u;
+        bool force   = g_force_redraw;
+        if (!claimed && force) {
+            /* An app may have closed the device or left SPI0 in another
+             * state; re-arm it before drawing again. */
+            dev_open(DEV_DISPLAY);
+        }
+        if (!g_enabled) {
+            if (!claimed && !cleared) {
+                clear_panel();
+                cleared = true;
+            }
+            g_force_redraw = false;
+        } else if (!claimed && (changed || force)) {
             draw(&g_snap[cur]);
             dev_ioctl(DEV_DISPLAY, IOCTL_DISP_FLUSH, NULL);
+            g_force_redraw = false;
+            cleared = false;
+        }
+        kmutex_unlock(&g_disp_mx);
+
+        if (changed) {
             first = false;
             cur ^= 1;
         }
@@ -336,6 +448,8 @@ static void status_thread(void *arg)
 
 void cl_status_start(void)
 {
+    kmutex_init(&g_disp_mx);
+    g_disp_ready = true;
     pcb_t *proc = task_find_process((uint32_t)sys_getpid());
     if (proc == NULL ||
         task_create_thread(proc, "cl-disp", status_thread, NULL,
@@ -346,7 +460,13 @@ void cl_status_start(void)
 
 #else  /* !PICOOS_DISPLAY_ENABLE */
 
+#include "cluster/cluster.h"
+#include "cluster/display.h"
+
 void cl_status_start(void) {}
 void cl_status_set_phase(cl_phase_t phase) { (void)phase; }
+void cl_status_set_enabled(bool enabled) { (void)enabled; }
+int  cl_display_claim(void) { return CLUSTER_OK; }
+void cl_display_release(void) {}
 
 #endif /* PICOOS_DISPLAY_ENABLE */

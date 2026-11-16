@@ -23,6 +23,9 @@ typedef struct {
     uint64_t next_tx_us;
 } cl_kill_t;
 
+static int  pick_node(void);
+static void one_more_free(uint16_t node);
+
 static cl_pending_t g_pending[CL_MAX_PENDING];
 static cl_kill_t    g_kills[CL_MAX_KILLS];
 static uint16_t     g_seq;
@@ -122,15 +125,79 @@ void cl_rpc_deliver(uint32_t req_id, int32_t status, int32_t err,
 {
     cl_pending_t *p = find(req_id);
     if (p != NULL) {
+        if ((p->state == CL_P_SENT || p->state == CL_P_RUNNING) &&
+            !p->unplaced && p->node != cl_self_id) {      /* SENT: ACK lost */
+            one_more_free(p->node);
+        }
         finish(p, status, err, ret, ret_len);
     }
 }
 
-void cl_rpc_on_spawn_ack(uint32_t req_id, uint8_t code)
+/* A busy refusal means our estimate for `node` was at least one too high. */
+static void one_less_free(uint16_t node)
+{
+    cl_node_t *n = cl_node_find(node);
+    if (n != NULL && n->sent_since_hello < n->free_slots) {
+        n->sent_since_hello++;
+    }
+}
+
+/* One of our tasks on `node` finished, so a worker there is free again.
+ * Without this the estimate only recovers at the next HELLO (1 s), which
+ * starves remote nodes of short tasks. */
+static void one_more_free(uint16_t node)
+{
+    cl_node_t *n = cl_node_find(node);
+    if (n == NULL) {
+        return;
+    }
+    if (n->sent_since_hello > 0u) {
+        n->sent_since_hello--;
+    } else if (n->free_slots < n->max_slots) {
+        n->free_slots++;
+    }
+}
+
+/* Place an unplaced request on the node with the most free slots, or try
+ * again a little later if every worker is busy. */
+static void replace(cl_pending_t *p, uint64_t now)
+{
+    int node = pick_node();
+    if (node < 0) {
+        p->next_tx_us = now + CL_RETRY_US;
+        return;
+    }
+    if (node == (int)cl_self_id) {
+        const cluster_task_t *ct = cl_task_find(p->task);
+        if (ct == NULL ||
+            cl_exec_start(p->req_id, cl_self_id, ct, p->arg, p->arg_len)
+                != CLUSTER_OK) {
+            p->next_tx_us = now + CL_RETRY_US;
+            return;
+        }
+        p->node     = cl_self_id;
+        p->unplaced = 0u;
+        p->state    = CL_P_RUNNING;
+        kfree(p->arg);
+        p->arg = NULL;
+        return;
+    }
+    p->node     = (uint16_t)node;
+    p->unplaced = 0u;
+    p->tries    = 0u;
+    cl_node_t *n = cl_node_find(p->node);
+    if (n != NULL) {
+        n->sent_since_hello++;
+    }
+    send_spawn(p, now);
+}
+
+void cl_rpc_on_spawn_ack(uint32_t req_id, uint16_t src_node, uint8_t code)
 {
     cl_pending_t *p = find(req_id);
-    if (p == NULL || p->state != CL_P_SENT) {
-        return;
+    if (p == NULL || p->state != CL_P_SENT || p->unplaced ||
+        src_node != p->node) {
+        return;                         /* stale: request has moved on */
     }
     switch (code) {
     case CL_ACK_OK:
@@ -142,7 +209,14 @@ void cl_rpc_on_spawn_ack(uint32_t req_id, uint8_t code)
         finish(p, 0, CLUSTER_ERR_NOTASK, NULL, 0u);
         break;
     default:
-        finish(p, 0, CLUSTER_ERR_BUSY, NULL, 0u);
+        one_less_free(p->node);
+        if (p->any && p->replaced < CL_BUSY_REPLACES) {
+            p->replaced++;
+            p->unplaced   = 1u;
+            p->next_tx_us = 0u;         /* re-place on the next tick */
+        } else {
+            finish(p, 0, CLUSTER_ERR_BUSY, NULL, 0u);
+        }
         break;
     }
 }
@@ -161,7 +235,7 @@ void cl_rpc_node_lost(uint16_t node)
     for (int i = 0; i < CL_MAX_PENDING; i++) {
         cl_pending_t *p = &g_pending[i];
         if ((p->state == CL_P_SENT || p->state == CL_P_RUNNING) &&
-            p->node == node && node != cl_self_id) {
+            !p->unplaced && p->node == node && node != cl_self_id) {
             finish(p, 0, CLUSTER_ERR_NODE_LOST, NULL, 0u);
         }
     }
@@ -171,7 +245,11 @@ void cl_rpc_tick(uint64_t now)
 {
     for (int i = 0; i < CL_MAX_PENDING; i++) {
         cl_pending_t *p = &g_pending[i];
-        if (p->state == CL_P_SENT && now >= p->next_tx_us) {
+        if (p->state == CL_P_SENT && p->unplaced) {
+            if (now >= p->next_tx_us) {
+                replace(p, now);
+            }
+        } else if (p->state == CL_P_SENT && now >= p->next_tx_us) {
             if (p->tries >= CL_SPAWN_TRIES) {
                 finish(p, 0, CLUSTER_ERR_NODE_LOST, NULL, 0u);
             } else {
@@ -260,7 +338,8 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
 
     cl_lock();
 
-    if (node == CLUSTER_NODE_ANY) {
+    bool any = node == CLUSTER_NODE_ANY;
+    if (any) {
         node = pick_node();
         if (node < 0) {
             cl_unlock();
@@ -289,6 +368,7 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
     if (++g_seq == 0u) g_seq = 1u;
     p->req_id = ((uint32_t)cl_self_id << 16) | g_seq;
     p->node   = (uint16_t)node;
+    p->any    = any ? 1u : 0u;
     strncpy(p->task, task, sizeof(p->task) - 1u);
     ksemaphore_init(&p->done, 0);
 
@@ -360,6 +440,7 @@ int cluster_thread_join(cluster_thread_t *t, void *ret, size_t ret_max,
     if (p->ret != NULL) {
         kfree(p->ret);
     }
+    t->node = p->node;                  /* may have been re-placed */
     memset(p, 0, sizeof(*p));           /* state = CL_P_FREE */
     cl_unlock();
 
@@ -386,7 +467,9 @@ int cluster_thread_kill(cluster_thread_t *t)
         return CLUSTER_OK;            /* already finished — keep its result */
     }
 
-    if (p->node == cl_self_id) {
+    if (p->unplaced) {
+        /* Not on any node right now: nothing to tell. */
+    } else if (p->node == cl_self_id) {
         (void)cl_exec_kill(p->req_id);
     } else {
         /* SENT or RUNNING: tell the worker.  If the kill table is full the
