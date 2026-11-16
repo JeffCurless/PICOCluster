@@ -209,3 +209,7 @@ cleared once after boot and then left to apps.
   created-but-unjoined threads per node (`CLUSTER_MAX_PENDING`). Arguments and
   results are up to 512 bytes each (`CLUSTER_MAX_PAYLOAD`). Requires picoOS
   0.4.2 or later (16 processes, 32 threads).
+
+## License
+
+MIT. See [LICENSE](LICENSE). The `picoOS` submodule is a separate repository with its own license.
