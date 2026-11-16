@@ -11,3 +11,6 @@ tests/build/
 *.swp
 *~
 .cache/
+
+# Commit message drafts
+commit.txt
