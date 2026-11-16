@@ -64,7 +64,7 @@ pico_sdk_init()
 # ---------------------------------------------------------------------------
 set(CLUSTER_VER_MAJOR 0)
 set(CLUSTER_VER_MINOR 0)
-set(CLUSTER_VER_EDIT  6)
+set(CLUSTER_VER_EDIT  7)
 set(PICOCLUSTER_VERSION "${CLUSTER_VER_MAJOR}.${CLUSTER_VER_MINOR}.${CLUSTER_VER_EDIT}")
 message(STATUS "picoCluster version   : ${PICOCLUSTER_VERSION}")
 

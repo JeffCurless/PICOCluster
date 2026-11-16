@@ -5,6 +5,7 @@
 #include "cluster/rpc.h"
 #include "cluster/cluster.h"
 #include "cluster/core.h"
+#include "cluster/diag.h"
 #include "cluster/exec.h"
 #include "cluster/net.h"
 #include "cluster/node.h"
@@ -337,17 +338,20 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
     }
 
     cl_lock();
+    CL_CRUMB(cl_crumb_create);
 
     bool any = node == CLUSTER_NODE_ANY;
     if (any) {
         node = pick_node();
         if (node < 0) {
+            CL_CRUMB_DONE(cl_crumb_create);
             cl_unlock();
             return CLUSTER_ERR_BUSY;
         }
     } else if (node != (int)cl_self_id &&
                (node < 0 || node > 0xFFFF ||
                 !cl_node_usable(cl_node_find((uint16_t)node)))) {
+        CL_CRUMB_DONE(cl_crumb_create);
         cl_unlock();
         return CLUSTER_ERR_NONODE;
     }
@@ -360,6 +364,7 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
         }
     }
     if (p == NULL) {
+        CL_CRUMB_DONE(cl_crumb_create);
         cl_unlock();
         return CLUSTER_ERR_BUSY;
     }
@@ -373,17 +378,21 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
     ksemaphore_init(&p->done, 0);
 
     if (node == (int)cl_self_id) {
+        CL_CRUMB(cl_crumb_create);
         int rc = cl_exec_start(p->req_id, cl_self_id, ct, arg, arg_len);
         if (rc != CLUSTER_OK) {
             p->state = CL_P_FREE;
+            CL_CRUMB_DONE(cl_crumb_create);
             cl_unlock();
             return rc;
         }
         p->state = CL_P_RUNNING;
     } else {
+        CL_CRUMB(cl_crumb_create);
         p->arg = (uint8_t *)kmalloc(arg_len > 0u ? arg_len : 1u);
         if (p->arg == NULL) {
             p->state = CL_P_FREE;
+            CL_CRUMB_DONE(cl_crumb_create);
             cl_unlock();
             return CLUSTER_ERR_NOMEM;
         }
@@ -396,11 +405,13 @@ int cluster_thread_create(cluster_thread_t *t, const char *task,
         if (n != NULL) {
             n->sent_since_hello++;
         }
+        CL_CRUMB(cl_crumb_create);
         send_spawn(p, cl_now_us());
     }
 
     t->req_id = p->req_id;
     t->node   = node;
+    CL_CRUMB_DONE(cl_crumb_create);
     cl_unlock();
     return CLUSTER_OK;
 }

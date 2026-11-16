@@ -5,7 +5,8 @@
  * are expected to stay on picoOS APIs, but the cluster layer is an operating
  * system extension: picoOS only offers multicast, and the layer needs
  * unicast UDP with payloads larger than WIFI_MCAST_MAX_PAYLOAD.  Every lwIP
- * call is made inside cyw43_arch_lwip_begin/end, as kernel/wifi.c does.
+ * and CYW43 call is made inside wifi_lwip_begin/end (kernel/wifi.h), which
+ * orders threads as well as cores; cyw43_arch_lwip_begin/end alone does not.
  *
  * WiFi power save is turned off when the sockets open (cl_net_open).  With
  * the SDK default (CYW43_PERFORMANCE_PM) the radio sleeps between beacons
@@ -20,6 +21,7 @@
 
 #include "cluster/net.h"
 #include "cluster/core.h"
+#include "cluster/diag.h"
 
 #include "kernel/wifi.h"
 
@@ -30,6 +32,7 @@
 #include "lwip/udp.h"
 
 #include <string.h>
+
 
 /* 16 slots (~9 KB) absorb a burst of SPAWNs or RESULTs between clusterd's
  * 5 ms polls; with 6, mandel's bursts overflowed it and every dropped
@@ -138,7 +141,7 @@ int cl_net_open(void)
         wifi_mcast_close(g_mcast);
         g_mcast = -1;
     }
-    cyw43_arch_lwip_begin();
+    wifi_lwip_begin();
     if (g_pcb != NULL) {
         udp_remove(g_pcb);
         g_pcb = NULL;
@@ -148,20 +151,20 @@ int cl_net_open(void)
 
     struct udp_pcb *pcb = udp_new();
     if (pcb == NULL) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         CL_LOG("udp_new failed\r\n");
         return -1;
     }
     if (udp_bind(pcb, IP_ADDR_ANY, CL_UDP_PORT) != ERR_OK) {
         udp_remove(pcb);
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
         CL_LOG("cannot bind UDP port %u\r\n", (unsigned)CL_UDP_PORT);
         return -1;
     }
     udp_recv(pcb, ucast_recv, NULL);
     g_pcb = pcb;
     int pm_rc = cyw43_wifi_pm(&cyw43_state, CYW43_NONE_PM);
-    cyw43_arch_lwip_end();
+    wifi_lwip_end();
     if (pm_rc != 0) {
         CL_LOG("could not turn off WiFi power save (%d)\r\n", pm_rc);
     }
@@ -184,20 +187,28 @@ int cl_net_send_to(const char *ip, const void *data, size_t len)
         return -1;
     }
 
-    cyw43_arch_lwip_begin();
+    CL_CRUMB(cl_crumb_net);
+    wifi_lwip_begin();
+    CL_CRUMB(cl_crumb_net);
     if (g_pcb == NULL) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
+        CL_CRUMB_DONE(cl_crumb_net);
         return -1;
     }
     struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, (u16_t)len, PBUF_RAM);
     if (p == NULL) {
-        cyw43_arch_lwip_end();
+        wifi_lwip_end();
+        CL_CRUMB_DONE(cl_crumb_net);
         return -1;
     }
     memcpy(p->payload, data, len);
+    CL_CRUMB(cl_crumb_net);
     err_t err = udp_sendto(g_pcb, p, &dst, CL_UDP_PORT);
+    CL_CRUMB(cl_crumb_net);
     pbuf_free(p);
-    cyw43_arch_lwip_end();
+    CL_CRUMB(cl_crumb_net);                /* wifi_lwip_end may run driver work */
+    wifi_lwip_end();
+    CL_CRUMB_DONE(cl_crumb_net);
     return err == ERR_OK ? 0 : -1;
 }
 

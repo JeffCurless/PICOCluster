@@ -5,6 +5,7 @@
 #include "cluster/exec.h"
 #include "cluster/cluster.h"
 #include "cluster/core.h"
+#include "cluster/diag.h"
 
 #include "kernel/mem.h"
 #include "kernel/task.h"
@@ -106,14 +107,17 @@ int cl_exec_start(uint32_t req_id, uint16_t origin, const cluster_task_t *task,
         }
     }
     if (j == NULL) {
+        CL_CRUMB_DONE(cl_crumb_exec);
         return CLUSTER_ERR_BUSY;
     }
 
+    CL_CRUMB(cl_crumb_exec);
     memset(j, 0, sizeof(*j));
     j->arg = (uint8_t *)kmalloc(arg_len > 0u ? arg_len : 1u);
     j->ret = (uint8_t *)kmalloc(CLUSTER_MAX_PAYLOAD);
     if (j->arg == NULL || j->ret == NULL) {
         cl_exec_free(j);
+        CL_CRUMB_DONE(cl_crumb_exec);
         return CLUSTER_ERR_NOMEM;
     }
     if (arg_len > 0u) {
@@ -124,12 +128,15 @@ int cl_exec_start(uint32_t req_id, uint16_t origin, const cluster_task_t *task,
     j->origin  = origin;
     j->task    = task;
 
+    CL_CRUMB(cl_crumb_exec);
     uint32_t pid = task_alloc_pid(PID_RANGE_SPAWN);
     pcb_t *proc = (pid != 0u) ? task_create_process(task->name, pid) : NULL;
     if (proc == NULL) {
         cl_exec_free(j);
+        CL_CRUMB_DONE(cl_crumb_exec);
         return CLUSTER_ERR_BUSY;
     }
+    CL_CRUMB(cl_crumb_exec);
     j->pid   = pid;
     j->state = CL_JOB_RUNNING;
     tcb_t *t = task_create_thread(proc, task->name, cl_trampoline, j,
@@ -139,10 +146,12 @@ int cl_exec_start(uint32_t req_id, uint16_t origin, const cluster_task_t *task,
     if (t == NULL) {
         task_free_process(proc);
         cl_exec_free(j);
+        CL_CRUMB_DONE(cl_crumb_exec);
         return CLUSTER_ERR_BUSY;
     }
     j->started_us = cl_now_us();
     cl_stat_tasks_run++;
+    CL_CRUMB_DONE(cl_crumb_exec);
     return CLUSTER_OK;
 }
 

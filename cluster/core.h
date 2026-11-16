@@ -33,8 +33,18 @@ extern uint16_t cl_self_id;      /* NODEID from config.txt   */
 extern uint32_t cl_build_id;     /* see clusterd.c           */
 
 bool cl_running(void);
+
+#ifdef PICOOS_LOCK_DEBUG
+/* Lock-debug builds: macros, so a deadlock report names the caller's
+ * file:line instead of this wrapper. */
+#include "kernel/sync.h"
+extern kmutex_t cl_g_lock;
+#define cl_lock()    kmutex_lock(&cl_g_lock)
+#define cl_unlock()  kmutex_unlock(&cl_g_lock)
+#else
 void cl_lock(void);
 void cl_unlock(void);
+#endif
 
 /* Activity counters (for the status page); updated under cl_lock. */
 extern uint32_t cl_stat_tasks_run;   /* tasks started on this node        */

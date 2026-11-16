@@ -13,6 +13,7 @@
 #include "cluster/clusterd.h"
 #include "cluster/cluster.h"
 #include "cluster/core.h"
+#include "cluster/diag.h"
 #include "cluster/exec.h"
 #include "cluster/net.h"
 #include "cluster/node.h"
@@ -38,7 +39,7 @@ uint8_t  cl_tx_buf[CL_MAX_PKT];
 uint32_t cl_stat_tasks_run;
 uint32_t cl_stat_reqs_done;
 
-static kmutex_t          g_lock;
+kmutex_t                 cl_g_lock;           /* cl_lock() (core.h)       */
 static volatile bool     g_running;
 static bool              g_started;           /* clusterd entered once    */
 static volatile bool     g_spawned;           /* cluster_start spawned it */
@@ -94,8 +95,10 @@ int cluster_start(uint32_t timeout_ms, bool *started)
     }
     return CLUSTER_OK;
 }
-void cl_lock(void)    { kmutex_lock(&g_lock); }
-void cl_unlock(void)  { kmutex_unlock(&g_lock); }
+#ifndef PICOOS_LOCK_DEBUG
+void cl_lock(void)    { kmutex_lock(&cl_g_lock); }
+void cl_unlock(void)  { kmutex_unlock(&cl_g_lock); }
+#endif
 
 int cluster_self(void)
 {
@@ -442,8 +445,42 @@ static int cmd_kill(int argc, char **argv)
     return 0;
 }
 
+/* -------------------------------------------------------------------------
+ * Breadcrumbs (diag.h) — read without any lock
+ * ------------------------------------------------------------------------- */
+cl_crumb_t cl_crumb_create;
+cl_crumb_t cl_crumb_exec;
+cl_crumb_t cl_crumb_net;
+cl_crumb_t cl_crumb_loop;
+
+static void print_crumb(const char *name, const char *file, const cl_crumb_t *c,
+                        uint64_t now)
+{
+    if (c->line == 0u) {
+        shell_print("  %-7s idle (last TID %ld)\r\n", name, (long)c->tid);
+    } else {
+        shell_print("  %-7s TID %ld at %s:%lu for %lu ms\r\n", name, (long)c->tid,
+                    file, (unsigned long)c->line,
+                    (unsigned long)((now - c->since_us) / 1000u));
+    }
+}
+
+void cl_diag_print(void)
+{
+    uint64_t now = time_us_64();
+    shell_print("cl_lock owner TID %ld\r\n", (long)cl_g_lock.owner_tid);
+    print_crumb("loop",   "clusterd.c", &cl_crumb_loop,   now);
+    print_crumb("create", "rpc.c",      &cl_crumb_create, now);
+    print_crumb("exec",   "exec.c",     &cl_crumb_exec,   now);
+    print_crumb("net",    "net.c",      &cl_crumb_net,    now);
+}
+
 static int cmd_cluster(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "diag") == 0) {
+        cl_diag_print();                /* no locks: works while stuck */
+        return 0;
+    }
     if (argc < 2 || strcmp(argv[1], "status") == 0) {
         cmd_status();
         return 0;
@@ -456,13 +493,13 @@ static int cmd_cluster(int argc, char **argv)
     if (strcmp(argv[1], "jobs")  == 0) { cmd_jobs();  return 0; }
     if (strcmp(argv[1], "run")   == 0) { return cmd_run(argc, argv); }
     if (strcmp(argv[1], "kill")  == 0) { return cmd_kill(argc, argv); }
-    shell_println("Usage: cluster [status|nodes|jobs|run <task> [arg] [node]|kill <req>]");
+    shell_println("Usage: cluster [status|nodes|jobs|run <task> [arg] [node]|kill <req>|diag]");
     return -1;
 }
 
 static const shell_cmd_t g_cluster_cmd = {
     "cluster",
-    "cluster [status|nodes|jobs|run <task> [arg] [node]|kill <req>]",
+    "cluster [status|nodes|jobs|run <task> [arg] [node]|kill <req>|diag]",
     cmd_cluster,
 };
 
@@ -481,7 +518,7 @@ void clusterd_entry(void *arg)
     g_started = true;
 
     cl_build_id = compute_build_id();
-    kmutex_init(&g_lock);
+    kmutex_init(&cl_g_lock);
     shell_register_cmd(&g_cluster_cmd);
     cl_status_start();      /* keeps showing the phase even if we stop below */
 
@@ -520,19 +557,26 @@ void clusterd_entry(void *arg)
     for (;;) {
         uint64_t now = cl_now_us();
 
+        CL_CRUMB(cl_crumb_loop);
         cl_lock();
+        CL_CRUMB(cl_crumb_loop);
         while (cl_net_recv(&g_rx)) {
             handle_packet(&g_rx, now);
         }
+        CL_CRUMB(cl_crumb_loop);
         service_jobs(now);
+        CL_CRUMB(cl_crumb_loop);
         cl_rpc_tick(now);
+        CL_CRUMB(cl_crumb_loop);
         int nlost = cl_nodes_expire(now, lost, CL_MAX_NODES);
         for (int i = 0; i < nlost; i++) {
             cl_rpc_node_lost(lost[i]);
         }
         if (now >= g_next_hello_us) {
+            CL_CRUMB(cl_crumb_loop);
             send_hello(now);
         }
+        CL_CRUMB_DONE(cl_crumb_loop);
         cl_unlock();
 
         sys_sleep(CLD_LOOP_MS);

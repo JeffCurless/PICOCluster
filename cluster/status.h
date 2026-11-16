@@ -23,7 +23,7 @@
 #ifndef CLUSTER_STATUS_H
 #define CLUSTER_STATUS_H
 
-#define CL_STATUS_PERIOD_MS  500u
+#define CL_STATUS_PERIOD_MS  200u
 
 typedef enum {
     CL_PHASE_STARTING = 0,
